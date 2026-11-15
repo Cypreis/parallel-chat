@@ -1,0 +1,17 @@
+{
+  "name": "parallel-chat",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Prototype chat harness: one answer as side-by-side cards, each with its own follow-up thread.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "optionalDependencies": {
+    "@anthropic-ai/sdk": "^1.8.0"
+  }
+}

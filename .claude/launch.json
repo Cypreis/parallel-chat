@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "parallel-chat",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["server.mjs"],
+      "port": 4317
+    },
+    {
+      "name": "parallel-chat-mock",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "set DEEPSEEK_API_KEY=&& set DASHSCOPE_API_KEY=&& set ANTHROPIC_API_KEY=&& set ANTHROPIC_AUTH_TOKEN=&& set PC_PROVIDER=mock&& set PORT=4318&& set PC_DATA_DIR=off&& node server.mjs"],
+      "port": 4318
+    }
+  ]
+}

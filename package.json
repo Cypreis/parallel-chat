@@ -1,8 +1,10 @@
 {
   "name": "parallel-chat",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
-  "description": "Prototype chat harness: one answer as side-by-side cards, each with its own follow-up thread.",
+  "description": "A local chat app that answers one question as side-by-side cards, each with its own follow-up thread.",
+  "license": "MIT",
+  "keywords": ["chat", "llm", "anthropic", "claude", "deepseek", "qwen", "cards"],
   "type": "module",
   "scripts": {
     "start": "node server.mjs",

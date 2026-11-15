@@ -1,14 +1,17 @@
-// Provider registry: the four providers, their keys, cached model lists, the
+// Provider registry: the three providers, their keys, cached model lists, the
 // model last chosen for each, and which one is active.
 //
 // Keys, highest priority first: posted from the page (memory); .keys.json in
-// the prototype folder (written only when the page asks to remember);
+// the app folder (written only when the page asks to remember);
 // environment (ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN, DEEPSEEK_API_KEY,
 // DASHSCOPE_API_KEY with DASHSCOPE_REGION). A key is never logged, never
 // returned (only its last four characters), and scrubbed from upstream errors.
 //
 // Startup calls no upstream API: a key from the file or the environment gives
 // hasKey true with models null until the page asks for the list.
+//
+// With no key there is no active provider: acquire() then returns one whose
+// every call fails with "add an API key", so the page can point to Settings.
 //
 // acquire() returns a provider bound to the active provider, model and key at
 // that moment. The engine calls it once per generation, so switching provider
@@ -22,7 +25,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { HttpError } from "../engine.mjs";
 import { createAnthropicProvider, listAnthropicModels } from "./anthropic.mjs";
-import { createMockProvider } from "./mock.mjs";
 import {
   createOpenAICompatProvider,
   DEEPSEEK_BASE,
@@ -35,14 +37,13 @@ import {
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const DEFAULT_KEYS_FILE = path.join(ROOT, ".keys.json");
-export const PROVIDER_IDS = ["mock", "anthropic", "deepseek", "qwen"];
+export const PROVIDER_IDS = ["anthropic", "deepseek", "qwen"];
 const LABELS = {
-  mock: "Mock (built in)",
   anthropic: "Anthropic",
   deepseek: "DeepSeek",
   qwen: "Qwen (Alibaba Cloud Model Studio)",
 };
-const SHORT = { mock: "Mock", anthropic: "Anthropic", deepseek: "DeepSeek", qwen: "Qwen" };
+const SHORT = { anthropic: "Anthropic", deepseek: "DeepSeek", qwen: "Qwen" };
 const ANTHROPIC_DEFAULT_MODEL = "claude-opus-5-5";
 
 // Last four characters only; nothing for a key too short to hide the rest.
@@ -69,15 +70,29 @@ export function validateBaseURL(raw) {
 
 const qwenRegion = (id) => QWEN_REGIONS.find((r) => r.id === id);
 
+export const NO_KEY_MESSAGE = "No model is connected yet. Open Settings and add an API key for Anthropic, DeepSeek or Qwen.";
+
+// What answers while no provider has a key: every call fails with NO_KEY_MESSAGE.
+export function createUnconfiguredProvider() {
+  return {
+    name: "none",
+    model: null,
+    // eslint-disable-next-line require-yield
+    async *stream() {
+      throw new Error(NO_KEY_MESSAGE);
+    },
+  };
+}
+
 export function createRegistry({
   env = process.env,
   keysFile = DEFAULT_KEYS_FILE,
-  mock = null,
+  fallback = null, // the provider used while none has a key (tests pass a scripted one)
   endpoints = {}, // test hooks: { deepseek: baseURL, anthropic: baseURL }
   fetch: doFetch = globalThis.fetch,
   logger = console,
 } = {}) {
-  const mockProvider = mock ?? createMockProvider({ speed: Number(env.MOCK_SPEED) || 1 });
+  const fallbackProvider = fallback ?? createUnconfiguredProvider();
   const entries = {};
   for (const id of PROVIDER_IDS) {
     entries[id] = {
@@ -91,9 +106,7 @@ export function createRegistry({
       noThinkingField: new Set(), // qwen models that reject enable_thinking
     };
   }
-  entries.mock.models = [{ id: "mock", label: "Built-in mock" }];
-  entries.mock.model = "mock";
-  let active = { id: "mock", model: "mock" };
+  let active = { id: null, model: null };
   let sdkAvailable = null;
   const anthropicCache = new Map();
 
@@ -135,7 +148,7 @@ export function createRegistry({
   }
 
   for (const [id, saved] of Object.entries(readKeysFile())) {
-    if (!entries[id] || id === "mock" || typeof saved?.apiKey !== "string" || !saved.apiKey) continue;
+    if (!entries[id] || typeof saved?.apiKey !== "string" || !saved.apiKey) continue;
     try {
       const baseURL = id === "qwen" && saved.baseURL ? validateBaseURL(saved.baseURL) : null;
       const region = id === "qwen" ? (baseURL ? "custom" : qwenRegion(saved.region)?.baseURL ? saved.region : "intl") : null;
@@ -178,11 +191,11 @@ export function createRegistry({
 
   function info(id) {
     const e = entries[id];
-    const cred = id === "mock" ? null : current(id);
+    const cred = current(id);
     return {
       id,
       label: LABELS[id],
-      needsKey: id !== "mock",
+      needsKey: true,
       hasKey: !!cred,
       keyHint: cred ? keyHint(cred.apiKey) : null,
       keySource: cred ? cred.source : null,
@@ -215,7 +228,7 @@ export function createRegistry({
         }
       }
       if (id === "qwen") return await listQwenModels({ baseURL: qwenBase(cred), apiKey: cred.apiKey, fetch: doFetch });
-      if (!(await sdkOK())) throw new HttpError(400, "The Anthropic SDK is not installed: run npm install in the prototype folder.");
+      if (!(await sdkOK())) throw new HttpError(400, "The Anthropic SDK is not installed: run npm install in the app folder.");
       try {
         return { models: await listAnthropicModels({ apiKey: keyForCall, baseURL: endpoints.anthropic }), modelsError: null };
       } catch (err) {
@@ -230,7 +243,6 @@ export function createRegistry({
 
   async function setKey(id, body) {
     requireProvider(id);
-    if (id === "mock") throw new HttpError(400, "the mock provider needs no key");
     const apiKey = typeof body?.apiKey === "string" ? body.apiKey.trim() : "";
     if (!apiKey) throw new HttpError(400, "apiKey is required");
     if (/\s/.test(apiKey)) throw new HttpError(400, "apiKey must not contain spaces");
@@ -279,7 +291,6 @@ export function createRegistry({
 
   async function refreshModels(id) {
     requireProvider(id);
-    if (id === "mock") return info(id);
     const cred = current(id);
     if (!cred) throw new HttpError(400, `${SHORT[id]} has no API key`);
     const { models, modelsError } = await fetchModels(id, cred);
@@ -290,7 +301,6 @@ export function createRegistry({
 
   function deleteKey(id) {
     requireProvider(id);
-    if (id === "mock") throw new HttpError(400, "the mock provider has no key");
     const e = entries[id];
     e.page = null;
     if (e.file) {
@@ -302,7 +312,7 @@ export function createRegistry({
     e.forgotten = true;
     e.models = null;
     e.modelsError = null;
-    if (active.id === id) active = { id: "mock", model: "mock" };
+    if (active.id === id) active = { id: null, model: null };
     logger.log?.(`[providers] ${id}: key removed`);
     return info(id);
   }
@@ -314,7 +324,6 @@ export function createRegistry({
     if (typeof id !== "string" || !PROVIDER_IDS.includes(id)) {
       throw new HttpError(400, `provider must be one of: ${PROVIDER_IDS.join(", ")}`);
     }
-    if (id === "mock") return { id, model: "mock" };
     if (!current(id)) throw new HttpError(400, `${SHORT[id]} has no API key; add one first`);
     if (id === "anthropic" && sdkAvailable === false) throw new HttpError(400, "The Anthropic SDK is not installed");
     if (model !== undefined && (typeof model !== "string" || !model.trim())) throw new HttpError(400, "model must be a non-empty string");
@@ -326,7 +335,7 @@ export function createRegistry({
   function activate({ id, model }) {
     active = { id, model };
     entries[id].model = model;
-    if (id !== "mock") logger.log?.(`[providers] active: ${id} (${model})`);
+    logger.log?.(`[providers] active: ${id} (${model})`);
   }
 
   function activeConfig() {
@@ -346,8 +355,8 @@ export function createRegistry({
   // A provider for one generation, bound to what is active right now.
   function acquire() {
     const { id, model } = active;
-    const cred = id === "mock" ? null : current(id);
-    if (!cred) return mockProvider;
+    const cred = id ? current(id) : null;
+    if (!cred) return fallbackProvider;
     if (id === "anthropic") {
       return {
         name: "anthropic",
@@ -371,25 +380,21 @@ export function createRegistry({
     });
   }
 
-  // Startup: Anthropic if its key is set and the SDK loads, else mock. No upstream calls.
+  // Startup: Anthropic if its key is set and the SDK loads, else no provider yet. No upstream calls.
   async function init() {
-    const present = PROVIDER_IDS.filter((id) => id !== "mock" && current(id)).map((id) => `${id} (${current(id).source})`);
+    const present = PROVIDER_IDS.filter((id) => current(id)).map((id) => `${id} (${current(id).source})`);
     if (present.length) logger.log?.(`[providers] keys available: ${present.join(", ")}`);
-    if (env.PC_PROVIDER === "mock") {
-      logger.log?.("[provider] mock (PC_PROVIDER=mock)");
-      return;
-    }
     if (!current("anthropic")) {
-      logger.log?.("[provider] mock (no Anthropic key set; keys can also be added in the app)");
+      logger.log?.("[provider] none yet: add an API key in the app (Settings) or in .env");
       return;
     }
     if (!(await sdkOK())) {
-      logger.log?.("[provider] mock (an Anthropic key is set but @anthropic-ai/sdk could not be loaded)");
+      logger.log?.("[provider] none yet: an Anthropic key is set but @anthropic-ai/sdk could not be loaded (run npm install)");
       return;
     }
     activate({ id: "anthropic", model: env.PC_MODEL || ANTHROPIC_DEFAULT_MODEL });
     logger.log?.(`[provider] anthropic (${active.model})`);
   }
 
-  return { init, list, info, setKey, refreshModels, deleteKey, check, activate, activeConfig, acquire, mock: mockProvider };
+  return { init, list, info, setKey, refreshModels, deleteKey, check, activate, activeConfig, acquire, fallback: fallbackProvider };
 }

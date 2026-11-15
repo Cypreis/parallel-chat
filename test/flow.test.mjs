@@ -7,7 +7,7 @@ import { buildAskContext, buildBranchContext, buildContext, existingCards, outli
 import { createEngine, titleFromText } from "../server/engine.mjs";
 import { startServer } from "../server/http.mjs";
 import { createLog } from "../server/log.mjs";
-import { branchInput, cardBody, cardLength, createMockProvider, derivePlan } from "../server/providers/mock.mjs";
+import { branchInput, cardBody, cardLength, createMockProvider, derivePlan } from "./support/mock.mjs";
 
 const quiet = { log() {}, warn() {}, error() {} };
 const Q1 = "How should we store events, and how do we stream them?";

@@ -416,7 +416,7 @@ export function buildFollowupContext(state, cardId, { text: followup, quote, car
   };
 }
 
-// What the mock (or a log line) needs to describe a follow-up context.
+// What a scripted test provider (or a log line) needs to describe a follow-up context.
 export function describeContext(state, cardId) {
   const card = requireCard(state, cardId);
   const chatId = chatOf(state, card.id);

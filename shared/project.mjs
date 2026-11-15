@@ -1,4 +1,4 @@
-// Shared reducer for the parallel chat prototype.
+// Shared reducer for parallel chat.
 // Runs unchanged in the browser and in Node: no DOM APIs, no Node APIs.
 // See protocol.md for the event table this implements.
 

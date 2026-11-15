@@ -3,20 +3,18 @@
 // Settings come from the environment, or from a .env file in this folder
 // (see .env.example). Variables already set in the environment win. Keys can
 // also be added in the web app (memory, or .keys.json when remembered).
-//   ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN   start on Anthropic (otherwise the mock)
+//   ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN   start on Anthropic
 //   DEEPSEEK_API_KEY                            DeepSeek key, selectable in the app
 //   DASHSCOPE_API_KEY, DASHSCOPE_REGION         Qwen key and region (intl, us, cn, hk)
 //   PORT          listen port (default 4317)
 //   HOST          listen address (default 127.0.0.1)
 //   PC_MODE       generation mode for new chats: fanout (default) or single
 //   PC_MAX_CARDS  cards one chat's answer may create, 1 to 6 (default 4)
-//   PC_PROVIDER   set to "mock" to force the mock even with a key
 //   PC_MODEL      model for the Anthropic provider (default claude-opus-5-5)
 //   PC_DATA_DIR   where chats and settings are kept across restarts (default
 //                 .data in this folder: log.jsonl and config.json, never a key);
 //                 a relative path is taken from this folder; "off" keeps
 //                 everything in memory
-//   MOCK_SPEED    mock delay divisor (default 1)
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -46,16 +44,14 @@ await registry.init(); // no upstream calls
 const app = await startServer({
   port,
   host,
-  provider: registry.mock,
   registry,
   mode,
   maxCards,
   dataDir,
-  forceMock: process.env.PC_PROVIDER === "mock",
 });
 const config = app.engine.getConfig();
 console.log(
-  `[parallel-chat] listening on http://${host}:${app.port} (provider ${config.provider}, model ${config.model}, mode ${config.mode}, maxCards ${config.maxCards}, data ${dataDir ?? "in memory"})`,
+  `[parallel-chat] listening on http://${host}:${app.port} (provider ${config.provider ?? "none yet"}, model ${config.model ?? "-"}, mode ${config.mode}, maxCards ${config.maxCards}, data ${dataDir ?? "in memory"})`,
 );
 
 let closing = false;

@@ -4,7 +4,7 @@ import http from "node:http";
 import { after, before, describe, test } from "node:test";
 import { applyEvent, cardsOf, createState, threadOf } from "../shared/project.mjs";
 import { startServer } from "../server/http.mjs";
-import { createMockProvider } from "../server/providers/mock.mjs";
+import { createMockProvider } from "./support/mock.mjs";
 
 const quiet = { log() {}, warn() {}, error() {} };
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -150,7 +150,7 @@ describe("end to end (mock provider)", () => {
 
   test("config, validation and static files", async () => {
     const cfg = await api(base, "GET", "/api/config");
-    assert.deepEqual(cfg, { status: 200, body: { provider: "mock", model: "mock", mode: "fanout", maxCards: 4 } });
+    assert.deepEqual(cfg, { status: 200, body: { provider: null, model: null, mode: "fanout", maxCards: 4 } });
     assert.equal((await api(base, "POST", "/api/config", { mode: "nope" })).status, 400);
     assert.equal((await api(base, "POST", "/api/config", { maxCards: 0 })).status, 400);
     assert.equal((await api(base, "POST", "/api/config", {})).status, 400);

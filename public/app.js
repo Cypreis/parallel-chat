@@ -1978,8 +1978,8 @@ function renderBar() {
 
 /* ---- Model section (providers, keys, models) */
 
-const PROV_ORDER = ['mock', 'anthropic', 'deepseek', 'qwen'];
-const provLabel = (p) => (p.id === 'mock' ? 'Mock' : p.label || p.id);
+const PROV_ORDER = ['anthropic', 'deepseek', 'qwen'];
+const provLabel = (p) => p.label || p.id;
 
 // Provider calls always send JSON and never notify: errors show inline in the dialog.
 async function pApi(method, path, body) {
@@ -2133,7 +2133,7 @@ function renderModelUi({ keepFocus = true } = {}) {
     },
       h('span', { class: 'pr-main' },
         h('span', { class: 'pr-name', text: provLabel(p) }),
-        h('span', { class: 'pr-sub muted', text: p.id === 'mock' ? 'no key needed' : p.hasKey && p.keyHint ? `key ${p.keyHint}` : '' })),
+        h('span', { class: 'pr-sub muted', text: p.hasKey && p.keyHint ? `key ${p.keyHint}` : '' })),
       isActive ? h('span', { class: 'active-mark', text: 'active' }) : null);
   }));
 
@@ -2149,13 +2149,6 @@ function providerPanel(p) {
   const panel = h('div', { class: 'prov-panel' });
   const err = h('p', { class: 'field-err', role: 'alert', text: st.error || '', hidden: !st.error });
   const isActive = ui.prov.active?.provider === p.id;
-
-  if (!p.needsKey) {
-    panel.append(h('p', { class: 'muted set-note', text: 'Mock, no key needed. It writes plausible answers locally so the layout can be tried without a provider.' }));
-    const use = h('button', { class: 'btn primary', type: 'button', 'data-fk': 'use', text: isActive ? 'In use' : 'Use Mock', disabled: isActive || st.busy, onclick: () => useModel(p) });
-    panel.append(h('div', { class: 'set-actions' }, use), err);
-    return panel;
-  }
 
   if (!p.hasKey) {
     // key entry: the value lives only in this input until Connect is pressed
@@ -2178,7 +2171,7 @@ function providerPanel(p) {
     const remember = h('input', { type: 'checkbox', id: 'rem-' + p.id, 'data-fk': 'remember', checked: st.remember, disabled: st.busy });
     remember.addEventListener('change', () => { st.remember = remember.checked; });
     panel.append(h('label', { class: 'check-row', for: 'rem-' + p.id }, remember, h('span', { text: 'Remember on this computer' })),
-      h('p', { class: 'muted set-note small', text: 'Saved in .keys.json in the prototype folder. Otherwise the key is forgotten when the server stops.' }));
+      h('p', { class: 'muted set-note small', text: 'Saved in .keys.json in the app folder (git-ignored). Otherwise the key is forgotten when the server stops.' }));
 
     const go = () => {
       const key = keyInput.value.trim();
@@ -2236,8 +2229,8 @@ function providerPanel(p) {
 function renderSettings() {
   const { provider, model, mode, maxCards } = ui.config;
   const modeLabel = mode === 'fanout' ? 'fan-out' : 'single';
-  setText(els.provider, provider ? [provider, model && model !== provider ? model : '', modeLabel].filter(Boolean).join(' \u00b7 ') : '');
-  setText(els.providerLine, provider ? (model && model !== provider ? provider + ' \u00b7 ' + model : provider) : 'Provider unknown');
+  setText(els.provider, provider ? [provider, model && model !== provider ? model : '', modeLabel].filter(Boolean).join(' \u00b7 ') : 'Add an API key');
+  setText(els.providerLine, provider ? (model && model !== provider ? provider + ' \u00b7 ' + model : provider) : 'No model connected yet');
   setHidden(els.providerLine, ui.prov.status === 'ready');
   for (const b of els.settings.querySelectorAll('[data-mode]')) {
     const on = b.dataset.mode === mode;

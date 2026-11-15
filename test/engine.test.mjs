@@ -4,7 +4,7 @@ import { cardsOf, threadOf, turns } from "../shared/project.mjs";
 import { buildContext } from "../server/context.mjs";
 import { computeAffects, createEngine, inferShape } from "../server/engine.mjs";
 import { createLog } from "../server/log.mjs";
-import { cardBody, cardSummary, createMockProvider, derivePlan, mockScript } from "../server/providers/mock.mjs";
+import { cardBody, cardSummary, createMockProvider, derivePlan, mockScript } from "./support/mock.mjs";
 
 const quiet = { log() {}, warn() {}, error() {} };
 const Q3 = "How should we store events, and how do we stream them to the browser, and what about caching?";

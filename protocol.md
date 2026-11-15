@@ -1,4 +1,4 @@
-# Parallel chat prototype: wire contract
+# Parallel chat: wire contract
 
 The server owns an append-only event log. The UI is a projection of that log.
 Both sides fold events with the same reducer, `shared/project.mjs`, which the
@@ -111,7 +111,7 @@ Every write returns as soon as the first events are logged; content arrives on t
 | --- | --- | --- | --- |
 | `GET /api/events` | `Last-Event-ID` header or `?since=<seq>` | SSE | replay events after `since`, then live |
 | `GET /api/state` | | projected state | debugging and tests |
-| `GET /api/config` | | `{ provider: "mock" \| "anthropic", model, mode, maxCards }` | |
+| `GET /api/config` | | `{ provider: "anthropic" \| "deepseek" \| "qwen" \| null, model, mode, maxCards }` | `provider` and `model` are null until a key is added |
 | `POST /api/config` | `{ mode?: "single" \| "fanout", maxCards?: 1..6 }` | config | settings for new turns; either field may be sent alone |
 | `POST /api/ask` | `{ text }` | 202 `{ turnId }` | new turn: question node, then cards stream in |
 | `POST /api/nodes/:cardId/reply` | `{ text, quote? }` | 202 `{ userNodeId, assistantNodeId }` | follow-up in that card's thread |
@@ -184,7 +184,7 @@ streaming when the server stopped is closed as `cancelled` during replay.
 `seq` continues from the last stored event, so a page that reconnects keeps
 its place. The active provider, model, mode and `maxCards` are stored in
 `.data/config.json` and restored when that provider still has a key (else
-mock). `POST /api/reset` empties the log file. `.data/` is git-ignored and
+no provider is active until one is added). `POST /api/reset` empties the log file. `.data/` is git-ignored and
 never holds a key. `PC_DATA_DIR` moves it; `PC_DATA_DIR=off` keeps everything
 in memory (tests use this).
 
@@ -207,14 +207,17 @@ chooses a model from the list the server fetched with that key. A key goes
 from the page to this server only, is never sent back to the page, never
 logged, and never put in the event log.
 
-Provider ids: `mock`, `anthropic`, `deepseek`, `qwen`.
+Provider ids: `anthropic`, `deepseek`, `qwen`. With no key, no provider is
+active (`provider: null`) and every generation fails at once with "No model is
+connected yet. Open Settings and add an API key…", so the page can send the
+user to Settings. Nothing is ever made up locally.
 
 ```js
 // ProviderInfo
 {
   id: "deepseek",
   label: "DeepSeek",
-  needsKey: true,              // false for mock
+  needsKey: true,
   hasKey: true,
   keyHint: "…9f2c" | null,     // last 4 characters only
   keySource: "page" | "file" | "env" | null,   // where the key in use came from
@@ -233,7 +236,7 @@ Provider ids: `mock`, `anthropic`, `deepseek`, `qwen`.
 | `GET /api/providers` | | `{ active: { provider, model }, providers: ProviderInfo[] }` | never fetches upstream; `models` is the cached list |
 | `POST /api/providers/:id/key` | `{ apiKey, region?, baseURL?, remember? }` | 200 `{ provider: ProviderInfo }` | checks the key by fetching the model list; stores the key in memory, and in `.keys.json` when `remember` is true. 400 `{ error }` when the provider rejects the key (nothing is stored) |
 | `POST /api/providers/:id/models` | | 200 `{ provider: ProviderInfo }` | fetch the model list again with the stored key |
-| `DELETE /api/providers/:id/key` | | 200 `{ provider: ProviderInfo }` | forget the key (memory and file). If that provider was active, the active provider becomes `mock` |
+| `DELETE /api/providers/:id/key` | | 200 `{ provider: ProviderInfo }` | forget the key (memory and file). If that provider was active, no provider is active until another is chosen |
 | `POST /api/config` | adds `{ provider?, model? }` | config | switch provider and model for new work. 400 when the provider has no key, or `model` is missing for a provider that needs one. `model` may be any non-empty string, so a model missing from the list can be typed |
 
 Rules:

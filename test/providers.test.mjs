@@ -11,7 +11,7 @@ import { cardsOf, threadOf } from "../shared/project.mjs";
 import { createEngine } from "../server/engine.mjs";
 import { startServer } from "../server/http.mjs";
 import { createLog } from "../server/log.mjs";
-import { createMockProvider, derivePlan } from "../server/providers/mock.mjs";
+import { createMockProvider, derivePlan } from "./support/mock.mjs";
 import { createOpenAICompatProvider, toOpenAIMessages } from "../server/providers/openai-compat.mjs";
 import { createRegistry } from "../server/providers/registry.mjs";
 import { CREATE_CARD, LINK_CARDS } from "../server/tools.mjs";
@@ -423,7 +423,7 @@ describe("provider registry and /api/providers", () => {
     dir = mkdtempSync(path.join(tmpdir(), "pc-keys-"));
     keysFile = path.join(dir, ".keys.json");
     const mock = createMockProvider({ speed: 200 });
-    const registry = createRegistry({ mock, env: {}, keysFile, endpoints: { deepseek: fake.url }, logger });
+    const registry = createRegistry({ fallback: mock, env: {}, keysFile, endpoints: { deepseek: fake.url }, logger });
     app = await startServer({ port: 0, provider: mock, registry, logger });
     base = app.url;
   });
@@ -437,20 +437,19 @@ describe("provider registry and /api/providers", () => {
     noKeys(JSON.stringify(app.log.since(0)), "the event log");
   });
 
-  test("the initial listing: four providers, no keys, mock active", async () => {
+  test("the initial listing: three providers, no keys, none active", async () => {
     const r = await api("GET", "/api/providers");
     assert.equal(r.status, 200);
-    assert.deepEqual(r.body.active, { provider: "mock", model: "mock" });
+    assert.deepEqual(r.body.active, { provider: null, model: null });
     assert.deepEqual(
       r.body.providers.map((p) => [p.id, p.needsKey, p.hasKey]),
       [
-        ["mock", false, false],
         ["anthropic", true, false],
         ["deepseek", true, false],
         ["qwen", true, false],
       ],
     );
-    const qwen = r.body.providers[3];
+    const qwen = r.body.providers[2];
     assert.deepEqual(
       qwen.regions.map((x) => x.id),
       ["intl", "us", "cn", "hk", "custom"],
@@ -560,13 +559,13 @@ describe("provider registry and /api/providers", () => {
     assert.equal(threadOf(s, cards[0].id).length, 2);
   });
 
-  test("DELETE while active falls back to mock", async () => {
+  test("DELETE while active leaves no provider", async () => {
     const r = await api("DELETE", "/api/providers/deepseek/key");
     assert.equal(r.status, 200);
     assert.equal(r.body.provider.hasKey, false);
     assert.equal(r.body.provider.models, null);
-    assert.equal((await api("GET", "/api/config")).body.provider, "mock");
-    assert.deepEqual((await api("GET", "/api/providers")).body.active, { provider: "mock", model: "mock" });
+    assert.equal((await api("GET", "/api/config")).body.provider, null);
+    assert.deepEqual((await api("GET", "/api/providers")).body.active, { provider: null, model: null });
   });
 
   test("remember writes .keys.json (0600) and DELETE removes it; startup reads it without calling upstream", async () => {
@@ -597,8 +596,8 @@ describe("provider registry and /api/providers", () => {
     });
     await reg.init();
     const { active, providers } = reg.list();
-    assert.deepEqual(active, { provider: "mock", model: "mock" });
-    const [ds, qw] = [providers[2], providers[3]];
+    assert.deepEqual(active, { provider: null, model: null });
+    const [ds, qw] = [providers[1], providers[2]];
     assert.deepEqual([ds.hasKey, ds.keySource, ds.models], [true, "env", null]);
     assert.deepEqual([qw.hasKey, qw.keySource, qw.region, qw.baseURL], [true, "env", "us", null]);
     assert.equal(fake.requests.length, calls);
@@ -713,7 +712,7 @@ test("switching provider mid-stream leaves the running generation on the old pro
         yield* inner.stream(args);
       },
     };
-    const registry = createRegistry({ mock, env: {}, keysFile: null, endpoints: { deepseek: fake.url }, logger: captureLogger() });
+    const registry = createRegistry({ fallback: mock, env: {}, keysFile: null, endpoints: { deepseek: fake.url }, logger: captureLogger() });
     const log = createLog();
     const engine = createEngine({ log, registry, mode: "single", logger: captureLogger() });
     await registry.setKey("deepseek", { apiKey: DS_KEY });

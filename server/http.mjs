@@ -7,7 +7,6 @@ import { fileURLToPath } from "node:url";
 import { createEngine, HttpError, MAX_CARDS, MODES } from "./engine.mjs";
 import { createStore } from "./store.mjs";
 import { createLog } from "./log.mjs";
-import { createMockProvider } from "./providers/mock.mjs";
 import { createRegistry } from "./providers/registry.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -40,7 +39,7 @@ const PLACEHOLDER =
   "  POST /api/nodes/:cardId/reply | branch | followup { text, quote? }.\n" +
   "Providers: GET /api/providers, POST /api/providers/:id/key { apiKey, region?, baseURL?, remember? },\n" +
   "  POST /api/providers/:id/models, DELETE /api/providers/:id/key, POST /api/config { provider, model }.\n" +
-  "  Provider ids: mock, anthropic, deepseek, qwen. These calls must come from this origin.\n";
+  "  Provider ids: anthropic, deepseek, qwen. These calls must come from this origin.\n";
 
 const isJSON = (req) => /^application\/json\b/i.test(String(req.headers["content-type"] ?? ""));
 const hasBody = (req) => Number(req.headers["content-length"] ?? 0) > 0 || req.headers["transfer-encoding"] !== undefined;
@@ -125,10 +124,11 @@ function decodeId(raw) {
 export async function startServer({
   port = 4317,
   host = "127.0.0.1",
-  provider = createMockProvider(),
+  // What answers while no provider has a key (tests pass a scripted one).
+  provider = undefined,
   logger = console,
-  // Without one: a registry with no keys whose mock slot is `provider`.
-  registry = createRegistry({ mock: provider, env: {}, keysFile: null, logger }),
+  // Without one: a registry with no keys, falling back to `provider`.
+  registry = createRegistry({ fallback: provider, env: {}, keysFile: null, logger }),
   mode = "fanout",
   maxCards = 4,
   publicDir = path.join(ROOT, "public"),
@@ -136,8 +136,6 @@ export async function startServer({
   pingMs = 15000,
   // Persistence directory (log.jsonl, config.json); null keeps everything in memory.
   dataDir = null,
-  // PC_PROVIDER=mock: never restore a stored provider.
-  forceMock = false,
 } = {}) {
   const log = createLog();
   const store = dataDir ? createStore({ dir: dataDir, logger }) : null;
@@ -146,7 +144,7 @@ export async function startServer({
     log.restore(events);
     if (events.length) logger.log?.(`[store] replayed ${events.length} events (last seq ${log.seq})`);
   }
-  const engine = createEngine({ log, provider, registry, mode, maxCards, logger });
+  const engine = createEngine({ log, provider: registry.fallback, registry, mode, maxCards, logger });
   let savedConfig = null;
   function persistConfig() {
     if (!store) return;
@@ -160,9 +158,7 @@ export async function startServer({
     log.subscribe((ev) => store.append(ev));
     engine.recover();
     restoreConfig(store.loadConfig());
-    // A forced mock does not overwrite the saved choice; a real change later does.
-    if (forceMock) savedConfig = JSON.stringify(engine.getConfig());
-    else persistConfig();
+    persistConfig();
   }
 
   // Settings from config.json; the provider only when it still has a key.
@@ -172,13 +168,12 @@ export async function startServer({
     if (MODES.includes(saved.mode)) base.mode = saved.mode;
     if (Number.isInteger(saved.maxCards) && saved.maxCards >= 1 && saved.maxCards <= MAX_CARDS) base.maxCards = saved.maxCards;
     if (Object.keys(base).length) engine.setConfig(base);
-    if (forceMock || typeof saved.provider !== "string") return;
+    if (typeof saved.provider !== "string") return;
     try {
       engine.setConfig({ provider: saved.provider, model: typeof saved.model === "string" && saved.model ? saved.model : undefined });
-      if (saved.provider !== "mock") logger.log?.(`[store] restored provider ${saved.provider} (${engine.getConfig().model})`);
+      logger.log?.(`[store] restored provider ${saved.provider} (${engine.getConfig().model})`);
     } catch {
-      engine.setConfig({ provider: "mock" });
-      logger.log?.(`[store] the saved provider ${saved.provider} has no key now; using mock`);
+      logger.log?.(`[store] the saved provider ${saved.provider} has no key now; add one in Settings`);
     }
   }
   let allowedHosts = new Set();
@@ -308,7 +303,7 @@ export async function startServer({
         guard(req, { json: false });
         req.resume();
         const provider = registry.deleteKey(id);
-        persistConfig(); // the active provider may have fallen back to mock
+        persistConfig(); // the active provider may have gone (no key)
         return sendJson(res, 200, { provider });
       }
     }

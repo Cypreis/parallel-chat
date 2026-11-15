@@ -7,7 +7,7 @@ import { buildContext, buildFollowupContext } from "../server/context.mjs";
 import { createEngine } from "../server/engine.mjs";
 import { startServer } from "../server/http.mjs";
 import { createLog } from "../server/log.mjs";
-import { branchInput, createMockProvider, FOLLOWUP_PREAMBLE, followupHasPreamble, followupPath } from "../server/providers/mock.mjs";
+import { branchInput, createMockProvider, FOLLOWUP_PREAMBLE, followupHasPreamble, followupPath } from "./support/mock.mjs";
 
 const quiet = { log() {}, warn() {}, error() {} };
 const SHORT = "Is it fast?";

@@ -6,7 +6,7 @@ import path from "node:path";
 import { after, describe, test } from "node:test";
 import { cardsOf } from "../shared/project.mjs";
 import { startServer } from "../server/http.mjs";
-import { createMockProvider } from "../server/providers/mock.mjs";
+import { createMockProvider } from "./support/mock.mjs";
 import { createRegistry } from "../server/providers/registry.mjs";
 
 const FAKE_KEY = "sk-fake-deepseek-persist-0123456789abcd";
@@ -33,7 +33,7 @@ const noFetch = () => {
 async function start(dataDir, opts = {}) {
   const logger = opts.logger ?? captureLogger();
   const provider = opts.provider ?? createMockProvider({ speed: 1000 });
-  const registry = opts.registry ?? createRegistry({ mock: provider, env: {}, keysFile: null, fetch: noFetch, logger });
+  const registry = opts.registry ?? createRegistry({ fallback: provider, env: {}, keysFile: null, fetch: noFetch, logger });
   return startServer({ port: 0, provider, registry, logger, dataDir, ...opts.server });
 }
 
@@ -226,11 +226,11 @@ describe("persistence", () => {
     }
   });
 
-  test("config is restored, falls back to mock without the key, and no file holds a key", async () => {
+  test("config is restored, has no provider without the key, and no file holds a key", async () => {
     const dir = tempDir();
-    const withKey = () => createRegistry({ env: { DEEPSEEK_API_KEY: FAKE_KEY }, keysFile: null, fetch: noFetch, logger: captureLogger() });
+    const withKey = () => createRegistry({ fallback: createMockProvider({ speed: 1000 }), env: { DEEPSEEK_API_KEY: FAKE_KEY }, keysFile: null, fetch: noFetch, logger: captureLogger() });
     const a = await start(dir, { registry: withKey() });
-    await post(a, "/api/ask", { text: "What is SSE?" }); // on the mock
+    await post(a, "/api/ask", { text: "What is SSE?" }); // on the scripted fallback
     await a.engine.idle();
     const r = await post(a, "/api/config", { mode: "single", maxCards: 3, provider: "deepseek", model: "deepseek-flash" });
     assert.equal(r.status, 200);
@@ -245,21 +245,12 @@ describe("persistence", () => {
       await b.close();
     }
 
-    const forced = await start(dir, { registry: withKey(), server: { forceMock: true } });
-    try {
-      assert.equal(forced.engine.getConfig().provider, "mock", "PC_PROVIDER=mock wins over the stored provider");
-      assert.equal(forced.engine.getConfig().mode, "single", "the rest is still restored");
-      assert.equal(JSON.parse(readFileSync(configFile, "utf8")).provider, "deepseek", "and the saved choice is kept");
-    } finally {
-      await forced.close();
-    }
-
     const logger = captureLogger();
     const c = await start(dir, { logger }); // no key now
     try {
-      assert.deepEqual(c.engine.getConfig(), { provider: "mock", model: "mock", mode: "single", maxCards: 3 });
-      assert.ok(logger.lines.some((l) => /saved provider deepseek has no key now; using mock/.test(l)));
-      assert.equal(JSON.parse(readFileSync(configFile, "utf8")).provider, "mock", "the fallback is written back");
+      assert.deepEqual(c.engine.getConfig(), { provider: null, model: null, mode: "single", maxCards: 3 });
+      assert.ok(logger.lines.some((l) => /saved provider deepseek has no key now; add one in Settings/.test(l)));
+      assert.equal(JSON.parse(readFileSync(configFile, "utf8")).provider, null, "no provider is written back");
     } finally {
       await c.close();
     }
@@ -271,7 +262,7 @@ describe("persistence", () => {
       assert.equal(JSON.parse(readFileSync(configFile, "utf8")).provider, "deepseek");
       const res = await fetch(`${d.url}/api/providers/deepseek/key`, { method: "DELETE" });
       assert.equal(res.status, 200);
-      assert.equal(JSON.parse(readFileSync(configFile, "utf8")).provider, "mock");
+      assert.equal(JSON.parse(readFileSync(configFile, "utf8")).provider, null);
     } finally {
       await d.close();
     }

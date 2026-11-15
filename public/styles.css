@@ -200,7 +200,9 @@ input[type="checkbox"] { margin: 0; accent-color: var(--accent); width: 15px; he
 .view-strip .row {
   display: flex; gap: var(--s-3); height: 100%; padding: var(--s-3) var(--s-4); overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain;
 }
-.view-strip .card { flex: none; height: 100%; }
+/* cards are as tall as what they say, up to the board; a long one scrolls inside */
+.view-strip .row { align-items: flex-start; }
+.view-strip .card { flex: none; height: auto; max-height: 100%; }
 .view-strip.narrow .row { scroll-snap-type: x mandatory; }
 .view-strip.narrow .card { scroll-snap-align: start; }
 .view-strip.narrow .w-btn { display: none; }
@@ -551,10 +553,17 @@ select:focus-visible { box-shadow: 0 0 0 2px var(--ring); }
 .icon-btn:disabled { opacity: 0.35; cursor: default; }
 
 /* tables */
-.table-wrap { overflow-x: auto; margin: 0.7em 0; }
-.md table { border-collapse: collapse; font-size: var(--t-13); min-width: 100%; width: max-content; }
-.md th, .md td { padding: var(--s-2) var(--s-4) var(--s-2) 0; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
-.md th { font-weight: 600; }
+/* A table fills the card and wraps its cells; it scrolls sideways only when
+   one word is wider than its column. Narrow cards get a tighter table. */
+.table-wrap { overflow-x: auto; margin: 0.7em 0; container-type: inline-size; }
+.md table { border-collapse: collapse; font-size: var(--t-13); width: 100%; }
+.md th, .md td { padding: var(--s-2) var(--s-3) var(--s-2) 0; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; overflow-wrap: break-word; hyphens: auto; }
+.md th:last-child, .md td:last-child { padding-right: 0; }
+.md th { font-weight: 600; border-bottom-color: var(--border-strong); }
+@container (max-width: 420px) {
+  .md table { font-size: var(--t-12); line-height: 1.4; }
+  .md th, .md td { padding: var(--s-1) var(--s-2) var(--s-1) 0; }
+}
 .md th.al-c, .md td.al-c { text-align: center; }
 .md th.al-r, .md td.al-r { text-align: right; }
 .md tbody tr:last-child td { border-bottom: 0; }
@@ -756,13 +765,27 @@ select:focus-visible { box-shadow: 0 0 0 2px var(--ring); }
 /* ---------------------------------------------- Strip: Focus (centred current card) */
 .view-strip.focus-on .row { padding-left: var(--focus-pad, 25%); padding-right: var(--focus-pad, 25%); scroll-snap-type: x mandatory; }
 .view-strip.focus-on .row.scrolling-free { scroll-snap-type: none; }
-.view-strip.focus-on .card { scroll-snap-align: center; scroll-snap-stop: always; transition: opacity 320ms var(--spring-soft), box-shadow 200ms, border-color 120ms; }
-.view-strip.focus-on .card:not(.cur) { opacity: .55; cursor: pointer; }
+.view-strip.focus-on .card { scroll-snap-align: center; scroll-snap-stop: always; transition: width 240ms var(--spring-soft), opacity 320ms var(--spring-soft), box-shadow 200ms, border-color 120ms; }
+/* side cards fit whole beside the current one: readable, a step back, and quieter */
+.view-strip.focus-on .card:not(.cur) { opacity: .78; cursor: pointer; }
+.view-strip.focus-on .card:not(.cur):hover { opacity: .92; }
+.view-strip.focus-on .card:not(.cur) .composer,
+.view-strip.focus-on .card:not(.cur) .head-actions { display: none; }
+.view-strip.focus-on .card:not(.cur) .title { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+@media (prefers-reduced-motion: reduce) { .view-strip.focus-on .card { transition: none; } }
 .view-strip.focus-on .card:not(.cur) * { pointer-events: none; }
 .view-strip.focus-on .card.cur { box-shadow: var(--shadow-md); }
 
 /* ------------------------------------------------ Flow: thin connector lines, typing, answered chip */
 .flow-links { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+/* a card and the follow-ups nested under it share a soft panel */
+.flow-family { fill: var(--surface-2); stroke: var(--border); stroke-width: 1; opacity: .7; transition: x 320ms var(--spring-soft), y 320ms var(--spring-soft), width 320ms var(--spring-soft), height 320ms var(--spring-soft); }
+@media (prefers-reduced-motion: reduce) { .flow-family { transition: none; } }
+/* a sub-card that is not open: title and first lines only; click to open it */
+.view-flow .card.fam-compact { cursor: pointer; overflow: hidden; }
+.view-flow .card.fam-compact .composer,
+.view-flow .card.fam-compact .ask-bubble { display: none; }
+.view-flow .card.fam-compact .card-scroll { overflow: hidden; -webkit-mask-image: linear-gradient(#000 60%, transparent); mask-image: linear-gradient(#000 60%, transparent); }
 .flow-link { fill: none; stroke: var(--border-strong); stroke-width: 1; opacity: .6; transition: stroke 160ms, opacity 160ms; pointer-events: none; }
 .flow-link.hot { stroke: var(--accent); opacity: .95; }
 .flow-link.edge { stroke-dasharray: 4 4; opacity: 0; }

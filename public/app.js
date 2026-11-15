@@ -30,7 +30,7 @@ function loadView() {
   try { const v = localStorage.getItem('pc.view'); return v === 'strip' ? 'strip' : v === 'flow' && HAS_FLOW ? 'flow' : 'fit'; } catch { return 'fit'; }
 }
 function loadWidth() {
-  try { const raw = localStorage.getItem('pc.width'); const n = raw == null ? NaN : Number(raw); return n >= 0 && n <= 2 && Number.isInteger(n) ? n : 1; } catch { return 1; }
+  try { const raw = localStorage.getItem('pc.width'); const n = raw == null ? NaN : Number(raw); return n >= 0 && n <= 4 && Number.isInteger(n) ? n : 1; } catch { return 1; }
 }
 function saveWidth(n) {
   try { localStorage.setItem('pc.width', String(n)); } catch { /* storage unavailable */ }
@@ -66,8 +66,8 @@ const ui = {
   palette: false,
   prevWidth: null,
   square: loadSquare(),  // Flow: short cards become 260px squares
-  width: loadWidth(),    // default Strip card width preset (index into PRESETS)
-  cardW: new Map(),      // card id -> own width preset (session only)
+  width: loadWidth(),    // default Strip card width: a SIZES id, or 2 for Focus
+  cardW: new Map(),      // card id -> own SIZES id (session only)
   current: new Map(),    // chat id -> current card id (the one keys act on)
   order: new Map(),      // chat id -> card ids in strip order (client side only)
   insertAfter: new Map(),// new card id -> card it should open beside
@@ -131,9 +131,29 @@ const cssVar = (n, f) => getComputedStyle(document.documentElement).getPropertyV
 const SPRING = cssVar('--spring', 'cubic-bezier(.2, .8, .2, 1)');
 const SPRING_SOFT = cssVar('--spring-soft', 'cubic-bezier(.2, .8, .2, 1)');
 const MOVE_MS = 320;
-const PRESETS = [{ label: '1/3', f: 1 / 3 }, { label: '1/2', f: 1 / 2 }, { label: 'Focus', f: 1 / 2 }];
-// Focus: the current card is half the board wide and centred; a quarter of each neighbour peeks in.
+// Strip card widths, narrowest first: `n` cards fill the board. The ids are
+// what is saved, so the older ones (0 = 1/3, 1 = 1/2, 2 = Focus) keep meaning.
+const SIZES = [{ id: 3, label: '1/4', n: 4 }, { id: 0, label: '1/3', n: 3 }, { id: 1, label: '1/2', n: 2 }, { id: 4, label: 'Full', n: 1 }];
+const sizeIndex = (id) => Math.max(0, SIZES.findIndex((s) => s.id === id));
+// a card's own size, else the board default (Focus counts as 1/2 for the per-card button)
+const sizeOf = (cardId) => ui.cardW.get(cardId) ?? (ui.width === 2 ? 1 : ui.width);
+const TABLE_RE = /^\s*\|.*\|\s*\n\s*\|?\s*:?-+:?\s*\|/m;
+// the size a card shows: fit to content makes a table card at least 1/2 unless the person sized it
+function sizeIdxOf(cardId) {
+  const i = sizeIndex(sizeOf(cardId));
+  return !ui.cardW.has(cardId) && TABLE_RE.test(state.nodes[cardId]?.body || '') ? Math.max(i, sizeIndex(1)) : i;
+}
+// Focus: the current card is centred and about half the board wide; each
+// neighbour is narrowed to fit whole in the space beside it, so its text reads.
 const isFocusOn = () => ui.width === 2 && effView() === 'strip' && !isNarrow();
+const FOCUS_GAP = 12; // the strip's card gap (--s-3)
+function focusLayout() {
+  const b = els.board.clientWidth, g = FOCUS_GAP;
+  let cur = Math.min(Math.round(b / 2), 820);
+  let side = Math.floor((b - cur) / 2 - 2 * g);
+  if (side < 220) { cur = Math.max(320, b - 2 * (220 + 2 * g)); side = Math.max(160, Math.floor((b - cur) / 2 - 2 * g)); }
+  return { cur, side, pad: Math.round((b - cur) / 2) };
+}
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -486,13 +506,12 @@ function tickGhost(cv) {
 }
 setInterval(() => { for (const cv of chatViews.values()) if (cv.planStart && !cv.ghost.hidden) tickGhost(cv); }, 1000);
 
-function cardWidthPx(cardId, boardInner) {
+function cardWidthPx(cardId, boardInner, curId) {
   if (isNarrow()) return Math.max(200, boardInner);
-  if (isFocusOn()) return Math.round(els.board.clientWidth / 2);
+  if (isFocusOn()) { const f = focusLayout(); return cardId === curId ? f.cur : f.side; }
   const gap = 12;
-  const p = Math.min(1, ui.cardW.get(cardId) ?? Math.min(1, ui.width));
-  const w = [(boardInner - 2 * gap) / 3, (boardInner - gap) / 2][p];
-  return Math.round(Math.max(320, w));
+  const { n } = SIZES[sizeIdxOf(cardId)];
+  return Math.round(Math.max(260, (boardInner - (n - 1) * gap) / n));
 }
 
 // Clear every inline layout property a view set, so another view starts clean.
@@ -555,8 +574,8 @@ function renderChats(ts) {
       if (v.mode !== view) { resetBox(v); v.mode = view; }
       cardEls.push(v.el);
       if (strip) {
-        cv.row.style.setProperty('--focus-pad', Math.round(els.board.clientWidth / 4) + 'px');
-        const w = cardWidthPx(c.id, inner);
+        if (isFocusOn()) cv.row.style.setProperty('--focus-pad', focusLayout().pad + 'px');
+        const w = cardWidthPx(c.id, inner, cur);
         if (v.w !== w) { v.w = w; v.el.style.width = w + 'px'; }
       }
       updateCard(v, c, cur, flow);
@@ -707,7 +726,7 @@ function flipRow(cv, cards, view, wasShown) {
 
 /* ---- Flow layout: cards sized by how much they say, packed into columns */
 
-const FLOW = { gap: 12, padX: 16, padY: 12, widths: [260, 340, 440, 560], charMax: [200, 600, 1300] };
+const FLOW = { gap: 12, padX: 16, padY: 12, widths: [260, 340, 440, 560], charMax: [200, 600, 1300], indent: 24, famMin: 120 };
 
 function textSize(v, c) {
   let len = (c.body || '').length;
@@ -717,7 +736,7 @@ function textSize(v, c) {
     thread = true;
     len += (m.body || '').length;
   }
-  const table = /^\s*\|.*\|\s*\n\s*\|?\s*:?-+:?\s*\|/m.test(c.body || '');
+  const table = TABLE_RE.test(c.body || '');
   const code = /```/.test(c.body || '');
   return { len, table, code, thread };
 }
@@ -752,21 +771,52 @@ function layoutFlow(cv, items, wasShown) {
   cv.flowBoard = boardKey;
 
   let relayout = false;
-  // 1. tiers from text, then widths (writes)
   const cards = items.filter((it) => it.kind === 'card');
+  // 0. families: a follow-up card nests under the card it was asked from, so a
+  // card and everything asked from it read as one group (a sub-card tree)
+  const depthOf = new Map(), rootOf = new Map(), kids = new Set();
+  for (const it of cards) {
+    const src = it.source && depthOf.has(it.source) ? it.source : null;
+    const d = src ? depthOf.get(src) + 1 : 0;
+    depthOf.set(it.id, d);
+    it.root = src ? rootOf.get(src) : it.id;
+    rootOf.set(it.id, it.root);
+    it.depth = narrow ? 0 : Math.min(3, d);
+    if (src) kids.add(it.root);
+  }
+  const curId = currentOf(cv.id);
+  const fams = new Map(), famOpen = new Map();
+  for (const it of cards) {
+    it.family = !narrow && kids.has(it.root);
+    if (!it.family) { setClass(it.v.el, 'fam-compact', false); continue; }
+    if (!fams.has(it.root)) fams.set(it.root, []);
+    fams.get(it.root).push(it);
+    if (it.id === curId || !famOpen.has(it.root)) famOpen.set(it.root, it.id);
+  }
+  for (const it of cards) if (it.family) setClass(it.v.el, 'fam-compact', famOpen.get(it.root) !== it.id);
+
+  // 1. tiers from text, then widths (writes)
   for (const it of cards) {
     if (it.v.sqMode !== ui.square) { it.v.sqMode = ui.square; it.v.needTier = 0; it.v.tier = undefined; }
     const sz = textSize(it.v, it.node);
     const t = tierFor(sz);
     it.v.tier = it.node.status === 'streaming' ? Math.max(it.v.tier ?? 0, t) : Math.max(t, it.v.needTier ?? 0);
     // a short card is exactly a 260 square and is never promoted for height
-    it.short = ui.square && !narrow && it.v.tier === 0;
+    it.short = ui.square && !narrow && it.v.tier === 0 && !it.family;
     if (it.v.sq !== it.short) { it.v.sq = it.short; it.v.linksSig = ''; relayout = true; }
     setClass(it.v.el, 'sq', it.short);
     it.v.sizeSig = '';
   }
   const widthOf = (t) => (narrow ? Math.min(inner, 560) : FLOW.widths[t]);
-  for (const it of cards) it.v.el.style.width = widthOf(it.v.tier) + 'px';
+  // a family shares one column width: wide enough for its widest member at its indent
+  const famW = new Map();
+  const sizeFamilies = () => {
+    famW.clear();
+    for (const it of cards) if (it.family) famW.set(it.root, Math.max(famW.get(it.root) || 0, FLOW.widths[it.v.tier] + FLOW.indent * it.depth));
+  };
+  const wOf = (it) => (it.family ? Math.min(famW.get(it.root), FLOW.widths[3] + FLOW.indent) - FLOW.indent * it.depth : widthOf(it.v.tier));
+  sizeFamilies();
+  for (const it of cards) it.v.el.style.width = wOf(it) + 'px';
   for (const it of items) if (it.kind === 'q') it.v.el.style.width = (narrow ? Math.min(inner, 560) : 260) + 'px';
 
   // 2. natural heights (reads); promote a tier when the content would still scroll
@@ -776,36 +826,55 @@ function layoutFlow(cv, items, wasShown) {
       if (it.short) { it.nat = 0; continue; }
       it.nat = naturalHeight(it.v);
       const [, hi] = tierBounds(it.v.tier, H);
-      if (it.v.tier < 3 && it.nat > hi + 1 && !narrow) {
+      const compact = it.family && famOpen.get(it.root) !== it.id; // clipped on purpose, never widened for height
+      if (it.v.tier < 3 && it.nat > hi + 1 && !narrow && !compact) {
         it.v.tier++; it.v.needTier = it.v.tier; promoted = true;
         it.v.el.style.width = widthOf(it.v.tier) + 'px';
       }
     }
     if (!promoted) break;
+    sizeFamilies();
+    for (const it of cards) if (it.family) it.v.el.style.width = wOf(it) + 'px';
   }
   for (const it of items) {
     if (it.kind === 'q') {
       it.w = narrow ? Math.min(inner, 560) : 260;
       it.h = Math.round(Math.min(Math.max(it.v.inner.offsetHeight + 2, 64), Math.round(H * 0.5)));
     } else {
-      it.w = widthOf(it.v.tier);
+      it.w = wOf(it);
       const [lo, hi] = tierBounds(it.v.tier, H);
+      // in a family every card is as tall as its content, so the tree stays compact
       it.h = it.v.tier === 0 ? lo : Math.round(Math.min(Math.max(it.nat, lo), hi));
     }
+  }
+  // family heights: the open card (current, else the root) takes up to 60% of
+  // the board; the others are compact sub-cards sharing what is left
+  for (const list of fams.values()) {
+    const open = list.find((it) => it.id === famOpen.get(list[0].root));
+    const rest = list.filter((it) => it !== open);
+    // leave room for the compact ones when that still keeps the open card readable
+    const cap = Math.max(H * 0.35, Math.min(H * 0.6, H - rest.length * (FLOW.famMin + gap)));
+    open.h = Math.round(Math.min(Math.max(open.nat, Math.min(FLOW.famMin, H)), cap));
+    const per = Math.max(Math.min(FLOW.famMin, H), Math.floor((H - open.h - gap * rest.length) / Math.max(1, rest.length)));
+    for (const it of rest) it.h = Math.round(Math.min(Math.max(it.nat, 72), per));
   }
 
   // 3. assign columns
   const cols = [];
   let cur = null;
   for (const it of items) {
-    const startNew = narrow || it.kind === 'q' || !cur
-      || (it.source && cur.items.some((x) => x.id === it.source))
+    // a family starts its own column and keeps it (spilling into the next one
+    // when it is taller than the board); loose cards still pack together
+    const famStart = it.kind === 'card' && it.depth === 0 && (it.family || !!cur?.family);
+    const startNew = narrow || it.kind === 'q' || !cur || famStart
+      || (!it.family && it.source && cur.items.some((x) => x.id === it.source))
       || cur.used + gap + it.h > H;
-    if (startNew) { cur = { items: [], used: 0, w: 0, x: 0 }; cols.push(cur); }
+    if (startNew) { cur = { items: [], used: 0, w: 0, x: 0, family: it.family ? it.root : null }; cols.push(cur); }
+    it.off = it.family ? FLOW.indent * it.depth : 0;
     it.y = cur.items.length ? cur.used + gap : 0;
     cur.used = it.y + it.h;
     cur.items.push(it);
-    cur.w = Math.max(cur.w, it.w);
+    cur.w = Math.max(cur.w, it.w + it.off);
     it.col = cols.length - 1;
   }
   let x = padX;
@@ -819,7 +888,7 @@ function layoutFlow(cv, items, wasShown) {
   const freshIds = new Set(items.filter((it) => it.v.fresh).map((it) => it.id));
   for (const it of items) {
     const v = it.v;
-    const px = cols[it.col].x, py = it.y + padY;
+    const px = cols[it.col].x + (it.off || 0), py = it.y + padY;
     const n = { x: px, y: py, w: it.w, h: it.h, col: it.col, tier: v.tier ?? -1 };
     placed.set(it.id, n);
     const o = v.fl;
@@ -864,7 +933,16 @@ function layoutFlow(cv, items, wasShown) {
     }
   }
   if (!wasShown) for (const it of items) it.v.fl = placed.get(it.id);
-  updateFlowLinks(cv, items, placed, totalW, H + 2 * padY, freshIds, sameBoard && !reducedMotion.matches);
+  // one soft panel behind each family, per column it spans
+  const groups = new Map();
+  for (const it of cards) {
+    if (!it.family) continue;
+    const n = placed.get(it.id), col = cols[it.col], k = it.root + '|' + it.col;
+    const g = groups.get(k) || { x: col.x, w: col.w, y: n.y, b: n.y + n.h };
+    g.y = Math.min(g.y, n.y); g.b = Math.max(g.b, n.y + n.h);
+    groups.set(k, g);
+  }
+  updateFlowLinks(cv, items, placed, totalW, H + 2 * padY, freshIds, sameBoard && !reducedMotion.matches, groups);
   if (relayout) schedule();
 }
 
@@ -899,7 +977,13 @@ function linkGeom(a, b, ya) {
   return { d: `M ${x1} ${y1} C ${x1 + k} ${y1}, ${x2 - k} ${y2}, ${x2} ${y2}`, x2, y2 };
 }
 
-function updateFlowLinks(cv, items, placed, totalW, H, freshIds, animateMoves) {
+// a follow-up nested under its source: a tree line down the source's left edge, then across
+function elbowGeom(a, b) {
+  const x0 = a.x + 12, y0 = a.y + a.h, y2 = b.y + 20, x2 = b.x, r = 8;
+  return { d: `M ${x0} ${y0} L ${x0} ${y2 - r} Q ${x0} ${y2}, ${x0 + r} ${y2} L ${x2} ${y2}`, x2, y2 };
+}
+
+function updateFlowLinks(cv, items, placed, totalW, H, freshIds, animateMoves, groups = new Map()) {
   let svg = cv.linkSvg;
   if (!svg) {
     svg = document.createElementNS(SVGNS, 'svg');
@@ -916,6 +1000,22 @@ function updateFlowLinks(cv, items, placed, totalW, H, freshIds, animateMoves) {
   }
   svg.setAttribute('width', Math.max(1, totalW));
   svg.setAttribute('height', Math.max(1, H));
+
+  if (!cv.famMap) cv.famMap = new Map();
+  for (const [k, g] of groups) {
+    let r = cv.famMap.get(k);
+    if (!r) {
+      r = document.createElementNS(SVGNS, 'rect');
+      r.setAttribute('class', 'flow-family');
+      r.setAttribute('rx', '16');
+      svg.prepend(r);
+      cv.famMap.set(k, r);
+    }
+    const p = 5;
+    r.style.x = (g.x - p) + 'px'; r.style.y = (g.y - p) + 'px';
+    r.style.width = (g.w + 2 * p) + 'px'; r.style.height = (g.b - g.y + 2 * p) + 'px';
+  }
+  for (const [k, r] of [...cv.famMap]) if (!groups.has(k)) { r.remove(); cv.famMap.delete(k); }
 
   const wanted = new Map();
   for (const it of items) {
@@ -945,7 +1045,7 @@ function updateFlowLinks(cv, items, placed, totalW, H, freshIds, animateMoves) {
       cv.linkMap.set(key, rec);
     }
     rec.from = from; rec.to = to;
-    const g = linkGeom(a, b, rec.qy);
+    const g = w.kind === 'origin' && a.col === b.col && b.y > a.y && b.x > a.x ? elbowGeom(a, b) : linkGeom(a, b, rec.qy);
     if (g.d !== rec.d) {
       const old = rec.d, oldCx = rec.cx, oldCy = rec.cy;
       rec.d = g.d; rec.cx = g.x2; rec.cy = g.y2;
@@ -991,9 +1091,9 @@ function refreshHot(cv) {
 // held or repeated arrow keys seemed to do nothing. Snapping is suspended for
 // the glide and resumes on the exact snap position. A new call retargets the
 // glide that is running.
-function glideTo(row, left) {
+function glideTo(row, left, exact = false) {
   const g = row._glide || (row._glide = { raf: 0, to: 0, from: 0, t0: 0 });
-  const max = Math.max(0, row.scrollWidth - row.clientWidth);
+  const max = exact ? Infinity : Math.max(0, row.scrollWidth - row.clientWidth);
   g.to = Math.max(0, Math.min(max, left));
   if (reducedMotion.matches) { cancelAnimationFrame(g.raf); g.raf = 0; row.classList.remove('scrolling-free'); row.scrollLeft = g.to; return; }
   if (!g.raf && Math.abs(g.to - row.scrollLeft) < 1) return;
@@ -1027,8 +1127,13 @@ function scrollCardIntoView(chatId, cardId) {
   const r = l + wd;
   const L = row.scrollLeft, R = L + row.clientWidth;
   if (view === 'strip' && isFocusOn()) {
-    const t = Math.max(0, l + wd / 2 - row.clientWidth / 2);
-    glideTo(row, t);
+    // Widths follow the current card, and they may not have been applied (or
+    // may still be easing), so place it from the layout rather than offsets:
+    // every card before it is a side card.
+    const f = focusLayout();
+    let n = 0;
+    for (let e = v.el.previousElementSibling; e; e = e.previousElementSibling) if (e.classList.contains('card')) n++;
+    glideTo(row, n * (f.side + FOCUS_GAP), true);
     return;
   }
   if (l >= L - 0.5 && r <= R + 0.5) return;
@@ -1056,7 +1161,7 @@ function setCurrent(id, { scroll = true } = {}) {
 }
 
 function cycleWidth(id) {
-  ui.cardW.set(id, ((ui.cardW.get(id) ?? Math.min(1, ui.width)) + 1) % 2);
+  ui.cardW.set(id, SIZES[(sizeIdxOf(id) + 1) % SIZES.length].id);
   schedule();
   requestAnimationFrame(() => setCurrent(id));
 }
@@ -1210,7 +1315,7 @@ function updateCard(v, c, curId, flow) {
   setClass(v.el, 'is-stale', st === 'stale');
   setClass(v.el, 'hl', (ui.kbd && curId === c.id) || ui.flashId === c.id);
   setClass(v.el, 'linked', ui.linkedId === c.id);
-  setText(v.wBtn, isFocusOn() ? 'Focus' : PRESETS[Math.min(1, ui.cardW.get(c.id) ?? Math.min(1, ui.width))].label);
+  setText(v.wBtn, isFocusOn() ? 'Focus' : SIZES[sizeIdxOf(c.id)].label);
   setClass(v.el, 'cur', curId === c.id);
 
   setHidden(v.stop, st !== 'streaming');
@@ -2662,8 +2767,8 @@ function toggleFocus() {
 function widen(delta) {
   const id = curCard();
   if (!id || effView() !== 'strip' || isFocusOn()) return;
-  const now = Math.min(1, ui.cardW.get(id) ?? Math.min(1, ui.width));
-  ui.cardW.set(id, Math.max(0, Math.min(1, now + delta)));
+  const now = sizeIdxOf(id);
+  ui.cardW.set(id, SIZES[Math.max(0, Math.min(SIZES.length - 1, now + delta))].id);
   schedule();
   requestAnimationFrame(() => setCurrent(id));
 }

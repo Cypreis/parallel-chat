@@ -308,13 +308,19 @@ export function cardBody(title, question, intent = "", { length = cardLength(tit
   if (length === "short") {
     return `${opener} ${points[0][0]} matters most here: ${points[0][1]} In practice "${points[1][0].toLowerCase()}" \u2192 fewer surprises.`;
   }
+  // a question that mentions a table gets one, wide enough to test how tables fit a card
+  const table = /\btables?\b/i.test(question)
+    ? ["", "| Principle | What it means | Where it helps | Cost |", "| --- | --- | --- | ---: |",
+        ...points.map(([k, v], i) => `| ${k} | ${v} | ${title} under load, retries and cancellation | ${["low", "medium", "high"][i % 3]} |`)]
+    : [];
   if (length === "medium") {
-    return [opener, "", ...points.map(([k, v]) => `- **${k}:** ${v}`), "", SPECIAL_LINE, "", pick(r, CLOSERS)].join("\n");
+    return [opener, "", ...points.map(([k, v]) => `- **${k}:** ${v}`), ...table, "", SPECIAL_LINE, "", pick(r, CLOSERS)].join("\n");
   }
   return [
     opener,
     "",
     ...points.map(([k, v]) => `- **${k}:** ${v}`),
+    ...table,
     "",
     "```js",
     `// ${title}: keep at most \`limit\` in flight`,

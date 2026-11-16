@@ -13,7 +13,17 @@ follow-up thread, so you can dig into one part without losing the others.
   current card centred between readable neighbours). *Flow* is one growing
   chat where follow-up cards nest under the card they came from.
 - **Links and decisions.** Cards link to related cards, even across chats.
-  Pin a decision and every card it affects is flagged for a refresh.
+  A decision is a rule the model must follow, in one chat or in all of
+  them. Pin one from a reply, a card or selected text, pick the cards it
+  changes, and those are marked *Out of date* until you refresh them.
+- **Files.** Attach text, code, CSV, JSON, Markdown, PDF or Word files with
+  the paperclip, by dropping them on the page or by pasting them. The model
+  reads a chat's files with every answer and reply in that chat.
+- **Notes.** Private notes on a chat or on any card. The model never sees
+  them.
+- **Your chats, organised.** Search every chat (titles, questions, cards,
+  notes, file names), rename, pin to the top, sort into groups (drag a chat
+  onto a group), export as Markdown, or delete for good.
 - **Your keys stay with you.** It runs on your machine and talks to the model
   provider you choose with your own API key.
 

@@ -87,6 +87,7 @@ export function createStore({ dir, logger = console }) {
         const op = ops.shift();
         try {
           if (op.kind === "truncate") await truncate(logFile, 0).catch((e) => (e.code === "ENOENT" ? null : Promise.reject(e)));
+          else if (op.kind === "rewrite") atomicWrite(logFile, op.text);
           else {
             // Coalesce every append queued behind this one into one write.
             let text = op.text;
@@ -117,6 +118,13 @@ export function createStore({ dir, logger = console }) {
     // Empty the log file (POST /api/reset). Ordered with the appends around it.
     truncate() {
       ops.push({ kind: "truncate" });
+      schedule();
+    },
+    // Replace the whole file with these events (a deleted chat was redacted).
+    // The list already holds every event queued so far, so queued writes go.
+    rewrite(events) {
+      ops.length = 0;
+      ops.push({ kind: "rewrite", text: events.map((e) => JSON.stringify(e) + "\n").join("") });
       schedule();
     },
     saveConfig(config) {

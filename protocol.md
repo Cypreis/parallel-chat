@@ -176,6 +176,64 @@ Events for a follow-up:
 
 Message nodes may therefore carry `pending?: boolean` and `answeredBy?: cardId`.
 
+## Chats, groups, notes, files and scoped decisions
+
+State gains four fields: `chatMeta: { [chatId]: { title?, pinned?, groupId? } }`,
+`groups: [{ id: "g_1", name }]`, `notes: { [targetId]: { text, ts } }` and
+`docs: [{ id: "f_1", chatId, name, mime, size, chars, text }]`. A chat id is
+the id of its first question. A decision gains `scope`: a chat id (it applies
+in that chat only) or `null` (every chat). A decision logged without `scope`
+applies everywhere.
+
+| type | payload | reducer effect |
+| --- | --- | --- |
+| `chat.meta` | `chatId`, `patch: { title?, pinned?, groupId? }` | merge; `null`, `""` or `false` removes a field; an empty entry is dropped |
+| `chat.delete` | `chatId` | remove the chat's nodes, the edges touching them, decisions scoped to it (cards elsewhere they made stale go back to settled), its notes, docs and meta; other decisions lose the removed ids from `affects` and `sourceNodeId` |
+| `group.add` | `group: { id, name }` | insert |
+| `group.patch` | `id`, `patch: { name }` | rename |
+| `group.remove` | `id` | remove; its chats lose `groupId` |
+| `note.set` | `targetId`, `text` | set; blank text removes the note |
+| `doc.add` | `doc` | insert |
+| `doc.remove` | `id` | remove |
+| `decision.patch` | `id`, `patch: { text?, affects? }` | update; when the text or `affects` changes, settled cards in `affects` become stale again |
+| `redacted` | `ref` | nothing (see deleting a chat) |
+
+Reducer helpers: `decisionsFor(state, chatId)` (scoped to it, or to every
+chat, in pin order), `docsOf(state, chatId)`, `chatNodeIds(state, chatId)`.
+
+**What the model sees.** `<decisions>` holds only the decisions that apply in
+the chat being worked on. `<documents>` holds the chat's files in full, each
+cut to its first 120,000 characters and all of them to 240,000; it sits right
+after `<question>` (inside the cached prefix) for cards, and first, with its
+own cache breakpoint, for a new question. Notes are never sent.
+
+| Method and path | Body | Response | Effect |
+| --- | --- | --- | --- |
+| `POST /api/ask` | adds `docs?: [{ name, text, mime?, size? }]` | 202 `{ turnId }` | the files join the chat before the answer starts |
+| `PATCH /api/chats/:chatId` | `{ title?, pinned?, groupId? }` | 200 `{ chatId, meta }` | `title: null` clears the name; `groupId: null` ungroups |
+| `DELETE /api/chats/:chatId` | | 200 `{ chatId }` | same-origin only. Stops its work, logs `chat.delete`, then redacts the chat's past events |
+| `POST /api/chats/:chatId/docs` | `{ docs }` | 201 `{ docs }` (without text) | attach files to an existing chat |
+| `DELETE /api/docs/:id` | | 200 `{ id }` | detach a file |
+| `POST /api/groups` | `{ name, chatIds? }` | 201 `{ group }` | |
+| `PATCH /api/groups/:id` | `{ name }` | 200 `{ group }` | |
+| `DELETE /api/groups/:id` | | 200 `{ id }` | its chats stay, ungrouped |
+| `PUT /api/notes/:targetId` | `{ text }` | 200 `{ targetId, note }` | target: a card or a chat; at most 20,000 characters |
+| `POST /api/decisions` | adds `scope?: chatId \| null` | 201 `{ decision }` | 400 if `scope` is not a chat |
+| `PATCH /api/decisions/:id` | `{ text?, affects? }` | 200 `{ decision }` | |
+
+A request may carry at most 10 files of at most 2,000,000 characters each;
+the request body limit is 32 MB. The page reads files to text itself (text
+and code as UTF-8, `.docx` by unzipping it, PDFs with pdf.js fetched from
+cdn.jsdelivr.net the first time one is attached).
+
+**Deleting a chat erases it.** After `chat.delete` is logged, every earlier
+event that carried the chat's content (its nodes and their deltas, patches
+and closes, edges touching it, decisions scoped to it, its meta, notes and
+files) is replaced in the log by `{ seq, ts, type: "redacted", ref }`, and
+the stored `log.jsonl` is rewritten. Seqs stay contiguous, so a page that
+reconnects keeps its place, and `ref` keeps the id so ids are never reused
+after a restart.
+
 ## Persistence
 
 The event log and the settings survive a restart. The server appends every

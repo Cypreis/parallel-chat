@@ -56,12 +56,38 @@ export function createLog({ now = () => Date.now() } = {}) {
     return append("session.reset");
   }
 
+  // Erase the content of past events (a deleted chat). refOf(event) returns
+  // the id an event carries when it must go, else null; the event keeps its
+  // seq and ts and becomes { type: "redacted", ref }, so seqs stay contiguous
+  // and ids are never reused. The state is not touched: the caller has
+  // already logged the event that removes the content from it. Rewrite
+  // listeners get the whole new list (the store rewrites its file).
+  const rewriters = new Set();
+  function redact(refOf) {
+    let n = 0;
+    events = events.map((ev) => {
+      const ref = ev.type === "redacted" ? null : refOf(ev);
+      if (ref === null || ref === undefined) return ev;
+      n += 1;
+      return { seq: ev.seq, ts: ev.ts, type: "redacted", ref };
+    });
+    if (n) for (const fn of rewriters) fn(events.slice());
+    return n;
+  }
+
+  function onRewrite(fn) {
+    rewriters.add(fn);
+    return () => rewriters.delete(fn);
+  }
+
   return {
     append,
     since,
     subscribe,
     reset,
     restore,
+    redact,
+    onRewrite,
     get state() {
       return state;
     },

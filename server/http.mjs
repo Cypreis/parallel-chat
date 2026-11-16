@@ -10,7 +10,7 @@ import { createLog } from "./log.mjs";
 import { createRegistry } from "./providers/registry.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const MAX_BODY = 1024 * 1024;
+const MAX_BODY = 32 * 1024 * 1024; // attached documents travel as text in the body
 
 const TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -156,6 +156,7 @@ export async function startServer({
   }
   if (store) {
     log.subscribe((ev) => store.append(ev));
+    log.onRewrite((events) => store.rewrite(events));
     engine.recover();
     restoreConfig(store.loadConfig());
     persistConfig();
@@ -247,6 +248,38 @@ export async function startServer({
       if (m === "DELETE" && (match = /^\/api\/decisions\/([^/]+)$/.exec(p))) {
         req.resume();
         return sendJson(res, 200, engine.unpin(decodeId(match[1])));
+      }
+      if (m === "PATCH" && (match = /^\/api\/decisions\/([^/]+)$/.exec(p))) {
+        return sendJson(res, 200, engine.editDecision(decodeId(match[1]), await readJson(req)));
+      }
+      if ((match = /^\/api\/chats\/([^/]+)$/.exec(p))) {
+        const id = decodeId(match[1]);
+        if (m === "PATCH") return sendJson(res, 200, engine.patchChat(id, await readJson(req)));
+        if (m === "DELETE") {
+          guard(req, { json: false }); // destructive: same-origin only
+          req.resume();
+          const out = engine.deleteChat(id);
+          return sendJson(res, 200, out);
+        }
+      }
+      if (m === "POST" && (match = /^\/api\/chats\/([^/]+)\/docs$/.exec(p))) {
+        return sendJson(res, 201, engine.addDocs(decodeId(match[1]), await readJson(req)));
+      }
+      if (m === "DELETE" && (match = /^\/api\/docs\/([^/]+)$/.exec(p))) {
+        req.resume();
+        return sendJson(res, 200, engine.removeDoc(decodeId(match[1])));
+      }
+      if (m === "POST" && p === "/api/groups") return sendJson(res, 201, engine.addGroup(await readJson(req)));
+      if ((match = /^\/api\/groups\/([^/]+)$/.exec(p))) {
+        const id = decodeId(match[1]);
+        if (m === "PATCH") return sendJson(res, 200, engine.patchGroup(id, await readJson(req)));
+        if (m === "DELETE") {
+          req.resume();
+          return sendJson(res, 200, engine.removeGroup(id));
+        }
+      }
+      if (m === "PUT" && (match = /^\/api\/notes\/([^/]+)$/.exec(p))) {
+        return sendJson(res, 200, engine.setNote(decodeId(match[1]), await readJson(req)));
       }
       if (m === "GET" && (match = /^\/api\/context\/([^/]+)$/.exec(p))) {
         return sendJson(res, 200, engine.context(decodeId(match[1])));

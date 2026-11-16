@@ -13,8 +13,9 @@
 // cancels them. Only the current owner of a node may write to it, which keeps
 // cancel, refresh-while-streaming and reset race-free.
 
-import { cardOf, cardsOf, chatOf, edgesOf } from "../shared/project.mjs";
+import { cardOf, cardsOf, chatNodeIds, chatOf, edgesOf } from "../shared/project.mjs";
 import {
+  decisionsIn,
   buildAskContext,
   buildBranchContext,
   buildFollowupContext,
@@ -35,6 +36,8 @@ export const MODES = ["single", "fanout"];
 export const MAX_CARDS = 6; // highest allowed maxCards
 export const DEFAULT_MAX_CARDS = 4;
 const MAX_ROUNDS = { answer: 8, reply: 4, write: 3 };
+export const MAX_DOCS = 10; // files per request
+export const MAX_DOC_CHARS = 2_000_000; // text of one file (the model is sent at most DOC_CHARS of it)
 
 // A short card title from what the user typed (text-only branch answers).
 export function titleFromText(text) {
@@ -136,11 +139,11 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
     mode: MODES.includes(mode) ? mode : "fanout",
     maxCards: Number.isInteger(maxCards) && maxCards >= 1 && maxCards <= MAX_CARDS ? maxCards : DEFAULT_MAX_CARDS,
   };
-  const counters = { n: 0, e: 0, d: 0 };
-  // A restored log: new ids continue after every id it holds.
+  const counters = { n: 0, e: 0, d: 0, g: 0, f: 0 };
+  // A restored log: new ids continue after every id it holds (redacted events keep theirs in ref).
   for (const ev of log.since(0)) {
-    for (const id of [ev.node?.id, ev.edge?.id, ev.decision?.id]) {
-      const m = /^([ned])_(\d+)$/.exec(id ?? "");
+    for (const id of [ev.node?.id, ev.edge?.id, ev.decision?.id, ev.group?.id, ev.doc?.id, ev.ref]) {
+      const m = /^([nedgf])_(\d+)$/.exec(id ?? "");
       if (m) counters[m[1]] = Math.max(counters[m[1]], Number(m[2]));
     }
   }
@@ -887,8 +890,11 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
       }
       chatId = first.id;
     }
+    const docs = docList(body?.docs);
     const { mode, maxCards } = config;
     const qid = openNode({ kind: "question", role: "user", body: text, status: "streaming", mode, chatId });
+    // Attached files join the chat before its context is built.
+    for (const d of docs) addDoc(chatId ?? qid, d);
     const job = startJob(qid);
     track(runAnswer(job, text, { mode, maxCards, provider: acquire() }));
     return { turnId: qid };
@@ -1010,7 +1016,7 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
       question: String(log.state.nodes[first.turnId]?.body ?? ""),
       title,
       sources: cards.map((c) => ({ title: c.title, summary: c.summary })),
-      decisions: log.state.decisions.map((d) => d.text),
+      decisions: decisionsIn(log.state, first.id).map((d) => d.text),
       sections: ctx.sections,
     };
     track(runWriter(acquire(), job, ctx, meta));
@@ -1039,7 +1045,7 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
       question: String(log.state.nodes[card.turnId]?.body ?? ""),
       title: card.title,
       oldChars: card.body.length,
-      decisions: log.state.decisions.map((d) => d.text),
+      decisions: decisionsIn(log.state, card.id).map((d) => d.text),
       sections: ctx.sections,
     };
     const prev = jobs.get(card.id);
@@ -1079,14 +1085,181 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
       }
       affects = [...new Set(body.affects)].filter((cid) => log.state.nodes[cid]?.kind === "card");
     }
-    const decision = { id: newId("d"), text, sourceNodeId, affects };
+    // scope: the chat it applies to; absent or null means every chat.
+    const scope = body?.scope === undefined || body?.scope === null ? null : requireChat(body.scope, "scope");
+    const decision = { id: newId("d"), text, sourceNodeId, affects, scope };
     log.append("decision.pin", { decision });
     return { decision };
+  }
+
+  // Edit a decision's text and/or the cards it marks out of date.
+  function editDecision(id, body) {
+    const d = log.state.decisions.find((x) => x.id === id);
+    if (!d) throw new HttpError(404, `unknown decision ${id}`);
+    const patch = {};
+    if (body?.text !== undefined) patch.text = requireText(body.text);
+    if (body?.affects !== undefined) {
+      if (!Array.isArray(body.affects) || !body.affects.every((v) => typeof v === "string")) {
+        throw new HttpError(400, "affects must be an array of card ids");
+      }
+      patch.affects = [...new Set(body.affects)].filter((cid) => log.state.nodes[cid]?.kind === "card");
+    }
+    if (!Object.keys(patch).length) throw new HttpError(400, "send text and/or affects");
+    log.append("decision.patch", { id, patch });
+    return { decision: log.state.decisions.find((x) => x.id === id) };
   }
 
   function unpin(id) {
     if (!log.state.decisions.some((d) => d.id === id)) throw new HttpError(404, `unknown decision ${id}`);
     log.append("decision.unpin", { id });
+    return { id };
+  }
+
+  // ---------- chats, groups, notes and documents ----------
+
+  function requireChat(id, name = "chatId") {
+    const first = typeof id === "string" ? log.state.nodes[id] : null;
+    if (!first || first.kind !== "question" || chatOf(log.state, first.id) !== first.id) {
+      throw new HttpError(400, `${name} must be the id of a chat's first question`);
+    }
+    return first.id;
+  }
+
+  function requireGroup(id) {
+    if (!log.state.groups.some((g) => g.id === id)) throw new HttpError(404, `unknown group ${id}`);
+    return id;
+  }
+
+  const shortName = (value, name, max = 120) => {
+    const t = oneLine(requireText(value, name));
+    return t.length > max ? t.slice(0, max) : t;
+  };
+
+  // Rename a chat, pin it to the top of the list, or move it into a group.
+  function patchChat(id, body) {
+    const chatId = requireChat(id);
+    const patch = {};
+    if (body?.title !== undefined) patch.title = body.title === null || body.title === "" ? null : shortName(body.title, "title");
+    if (body?.pinned !== undefined) patch.pinned = !!body.pinned;
+    if (body?.groupId !== undefined) patch.groupId = body.groupId === null ? null : requireGroup(body.groupId);
+    if (!Object.keys(patch).length) throw new HttpError(400, "send title, pinned and/or groupId");
+    log.append("chat.meta", { chatId, patch });
+    return { chatId, meta: log.state.chatMeta[chatId] ?? {} };
+  }
+
+  // Delete a chat for good: stop its work, remove it from the state, then
+  // erase its content from the stored history.
+  function deleteChat(id) {
+    const chatId = requireChat(id);
+    const s = log.state;
+    const ids = chatNodeIds(s, chatId);
+    for (const nodeId of ids) {
+      const job = jobs.get(nodeId);
+      if (job) {
+        detach(job);
+        job.controller.abort();
+      }
+    }
+    const decisions = new Set(s.decisions.filter((d) => d.scope === chatId).map((d) => d.id));
+    const docs = new Set(s.docs.filter((d) => d.chatId === chatId).map((d) => d.id));
+    log.append("chat.delete", { chatId });
+    log.redact((ev) => {
+      switch (ev.type) {
+        case "node.open":
+          return ids.has(ev.node?.id) ? ev.node.id : null;
+        case "node.delta":
+        case "node.patch":
+        case "node.reset":
+        case "node.close":
+          return ids.has(ev.id) ? ev.id : null;
+        case "edge.add":
+          return ids.has(ev.edge?.from) || ids.has(ev.edge?.to) ? ev.edge.id : null;
+        case "decision.pin":
+          return decisions.has(ev.decision?.id) ? ev.decision.id : null;
+        case "decision.patch":
+        case "decision.unpin":
+          return decisions.has(ev.id) ? ev.id : null;
+        case "chat.meta":
+          return ev.chatId === chatId ? chatId : null;
+        case "note.set":
+          return ids.has(ev.targetId) ? ev.targetId : null;
+        case "doc.add":
+          return docs.has(ev.doc?.id) ? ev.doc.id : null;
+        case "doc.remove":
+          return docs.has(ev.id) ? ev.id : null;
+        default:
+          return null;
+      }
+    });
+    return { chatId };
+  }
+
+  function addGroup(body) {
+    const group = { id: newId("g"), name: shortName(body?.name, "name", 60) };
+    log.append("group.add", { group });
+    if (Array.isArray(body?.chatIds)) for (const cid of body.chatIds) patchChat(cid, { groupId: group.id });
+    return { group };
+  }
+
+  function patchGroup(id, body) {
+    requireGroup(id);
+    log.append("group.patch", { id, patch: { name: shortName(body?.name, "name", 60) } });
+    return { group: log.state.groups.find((g) => g.id === id) };
+  }
+
+  // The group goes; its chats stay, ungrouped.
+  function removeGroup(id) {
+    requireGroup(id);
+    log.append("group.remove", { id });
+    return { id };
+  }
+
+  // A private note on a card or on a chat (its first question). The model never sees notes.
+  const NOTE_MAX = 20_000;
+  function setNote(targetId, body) {
+    const node = log.state.nodes[targetId];
+    if (!node) throw new HttpError(404, `unknown node ${targetId}`);
+    const isChat = node.kind === "question" && chatOf(log.state, node.id) === node.id;
+    if (node.kind !== "card" && !isChat) throw new HttpError(400, "notes go on a card or a chat");
+    if (body?.text !== undefined && body?.text !== null && typeof body.text !== "string") throw new HttpError(400, "text must be a string");
+    const text = String(body?.text ?? "");
+    if (text.length > NOTE_MAX) throw new HttpError(400, `a note may hold at most ${NOTE_MAX} characters`);
+    log.append("note.set", { targetId, text });
+    return { targetId, note: log.state.notes[targetId] ?? null };
+  }
+
+  function docList(value) {
+    if (value === undefined || value === null) return [];
+    if (!Array.isArray(value)) throw new HttpError(400, "docs must be an array");
+    if (value.length > MAX_DOCS) throw new HttpError(400, `attach at most ${MAX_DOCS} files at once`);
+    return value.map((d, i) => {
+      if (!d || typeof d !== "object") throw new HttpError(400, `docs[${i}] must be an object`);
+      const name = shortName(d.name, `docs[${i}].name`, 160);
+      if (typeof d.text !== "string") throw new HttpError(400, `docs[${i}].text must be a string`);
+      if (d.text.length > MAX_DOC_CHARS) throw new HttpError(400, `${name} is too long (at most ${MAX_DOC_CHARS} characters)`);
+      const mime = typeof d.mime === "string" ? d.mime.slice(0, 100) : "";
+      const size = Number.isFinite(d.size) && d.size >= 0 ? Math.floor(d.size) : d.text.length;
+      return { name, text: d.text, mime, size };
+    });
+  }
+
+  function addDoc(chatId, d) {
+    const doc = { id: newId("f"), chatId, name: d.name, mime: d.mime, size: d.size, chars: d.text.length, text: d.text };
+    log.append("doc.add", { doc });
+    return doc;
+  }
+
+  function addDocs(chatIdRaw, body) {
+    const chatId = requireChat(chatIdRaw);
+    const docs = docList(body?.docs);
+    if (!docs.length) throw new HttpError(400, "docs must hold at least one file");
+    const added = docs.map((d) => addDoc(chatId, d));
+    return { docs: added.map(({ text: _t, ...rest }) => rest) };
+  }
+
+  function removeDoc(id) {
+    if (!log.state.docs.some((d) => d.id === id)) throw new HttpError(404, `unknown document ${id}`);
+    log.append("doc.remove", { id });
     return { id };
   }
 
@@ -1166,6 +1339,15 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
     cancel,
     pin,
     unpin,
+    editDecision,
+    patchChat,
+    deleteChat,
+    addGroup,
+    patchGroup,
+    removeGroup,
+    setNote,
+    addDocs,
+    removeDoc,
     context,
     getConfig,
     setConfig,

@@ -26,7 +26,16 @@
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
         <span class="lbl">New chat</span><kbd class="lbl hint">n</kbd>
       </button>
-      <p class="side-label lbl">Chats</p>
+      <div class="side-search lbl">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg>
+        <label class="sr-only" for="chat-search">Search chats</label>
+        <input id="chat-search" type="search" placeholder="Search chats" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="side-label lbl side-label-row"><span>Chats</span>
+        <button id="new-group" class="icon-btn small" type="button" title="New group" aria-label="New group">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/><path d="M12 11v5M9.5 13.5h5"/></svg>
+        </button>
+      </div>
       <nav id="chat-list" class="chat-list" aria-label="Chats"></nav>
       <div class="side-foot">
         <button id="settings-btn" class="side-row pop-trigger" type="button" title="Settings" aria-label="Settings" aria-expanded="false" aria-controls="settings">
@@ -49,7 +58,7 @@
       <button id="menu-btn" class="icon-btn menu-btn" type="button" aria-label="Open sidebar">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
       </button>
-      <div class="head-title"><span id="top-no" class="top-no"></span><span id="top-meta" class="top-meta"></span></div>
+      <div class="head-title"><span id="top-no" class="top-no"></span><button id="top-name" class="top-name" type="button" title="Rename this chat" hidden></button><span id="top-meta" class="top-meta"></span></div>
       <div class="head-tools">
         <div class="seg" id="view-seg" role="radiogroup" aria-label="Board view">
           <button type="button" role="radio" aria-checked="true" data-view="fit" title="Every card visible at once (v)">Fit</button>
@@ -63,7 +72,15 @@
           <button type="button" role="radio" aria-checked="false" data-w="4" title="One card fills the board">Full</button>
           <button type="button" role="radio" aria-checked="false" data-w="2" title="Current card centred, neighbours peeking">Focus</button>
         </div>
-        <button id="dec-btn" class="btn" type="button" aria-expanded="false" aria-controls="drawer">Decisions <span id="dec-count" class="count" hidden></span></button>
+        <button id="files-btn" class="btn head-btn" type="button" aria-expanded="false" aria-controls="drawer" title="Files the model reads in this chat (f)">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11.5l-7.8 7.8a5 5 0 0 1-7.1-7.1l8.2-8.2a3.3 3.3 0 0 1 4.7 4.7l-8.2 8.2a1.7 1.7 0 0 1-2.4-2.4l7.5-7.5"/></svg>
+          <span class="hb-l">Files</span> <span id="files-count" class="count" hidden></span></button>
+        <button id="notes-btn" class="btn head-btn" type="button" aria-expanded="false" aria-controls="drawer" title="Your private notes on this chat (N)">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3.5h9l4 4V19a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 19V5a1.5 1.5 0 0 1 1-1.5z"/><path d="M8.5 11h7M8.5 14.5h7M8.5 7.5h3"/></svg>
+          <span class="hb-l">Notes</span> <span id="notes-count" class="count" hidden></span></button>
+        <button id="dec-btn" class="btn head-btn" type="button" aria-expanded="false" aria-controls="drawer" title="Rules the model must follow in this chat (d)">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3.5h6l-1 5 3.5 3.5h-11L10 8.5z"/><path d="M12 12v8.5"/></svg>
+          <span class="hb-l">Decisions</span> <span id="dec-count" class="count" hidden></span></button>
       </div>
     </header>
 
@@ -91,14 +108,49 @@
           </button>
         </div>
         <div id="pane-dec" class="pane" hidden>
-          <p class="rail-note">Pinned decisions are shared with every thread. Cards they affect go stale.</p>
-          <ul id="decisions" class="decisions"></ul>
+          <details id="dec-explain" class="explain">
+            <summary>What a decision does</summary>
+            <ul>
+              <li><strong>It is a rule for the model.</strong> Every new answer, reply and refresh in its scope is told to follow it, and it wins over anything the cards said before.</li>
+              <li><strong>Scope:</strong> <em>This chat</em> applies only here; <em>All chats</em> applies everywhere.</li>
+              <li><strong>Cards written before it are not rewritten by themselves.</strong> The ones you pick are marked <em>Out of date</em>; press <em>Refresh</em> to rewrite them with the decision.</li>
+              <li>Unpin it and the model stops following it; the out-of-date marks go away.</li>
+            </ul>
+            <p class="muted">Want to remember something without the model acting on it? Use Notes.</p>
+          </details>
+          <section class="dec-sec" id="dec-sec-chat"><h4 class="pane-h">This chat <span class="count" id="dec-n-chat"></span></h4><ul id="decisions" class="decisions"></ul></section>
+          <section class="dec-sec" id="dec-sec-all"><h4 class="pane-h">All chats <span class="count" id="dec-n-all"></span></h4><ul id="decisions-all" class="decisions"></ul></section>
+          <details class="dec-sec" id="dec-sec-other"><summary class="pane-h">Other chats only <span class="count" id="dec-n-other"></span></summary><ul id="decisions-other" class="decisions"></ul></details>
           <form id="dec-form" class="dec-form" autocomplete="off">
-            <label class="sr-only" for="dec-input">Pin a decision by hand</label>
-            <textarea id="dec-input" rows="2" placeholder="Pin a decision by hand"></textarea>
+            <h4 class="pane-h" id="dec-form-h">Pin a decision</h4>
+            <p id="dec-src" class="muted dec-src" hidden></p>
+            <label class="sr-only" for="dec-input">Decision</label>
+            <textarea id="dec-input" rows="2" placeholder="e.g. Use Postgres, not SQLite"></textarea>
+            <div class="dec-scope" role="radiogroup" aria-label="Applies to">
+              <span class="muted">Applies to</span>
+              <div class="seg"><button type="button" role="radio" data-scope="chat" aria-checked="true">This chat</button><button type="button" role="radio" data-scope="all" aria-checked="false">All chats</button></div>
+            </div>
+            <div id="dec-affects" class="dec-affects">
+              <div class="dec-aff-h"><span class="muted">Mark out of date</span><button id="dec-aff-all" class="linkish" type="button">All</button><button id="dec-aff-none" class="linkish" type="button">None</button></div>
+              <div id="dec-aff-list" class="aff-list"></div>
+            </div>
             <div id="dec-err" class="field-err" hidden></div>
-            <button class="btn primary" type="submit">Pin decision</button>
+            <div class="dec-form-btns"><button id="dec-submit" class="btn primary" type="submit">Pin decision</button><button id="dec-cancel" class="btn" type="button" hidden>Cancel</button></div>
           </form>
+        </div>
+        <div id="pane-notes" class="pane" hidden>
+          <p class="explain-line"><strong>Only you see notes.</strong> They are never sent to the model. To make the model follow something, pin it as a decision.</p>
+          <label class="pane-h" for="chat-note">Notes on this chat</label>
+          <textarea id="chat-note" class="note-area" rows="5" placeholder="Anything you want to remember about this chat"></textarea>
+          <p id="chat-note-state" class="muted save-state" aria-live="polite"></p>
+          <h4 class="pane-h">Notes on cards <span class="count" id="card-notes-n"></span></h4>
+          <ul id="card-notes" class="card-notes"></ul>
+        </div>
+        <div id="pane-files" class="pane" hidden>
+          <p class="explain-line"><strong>The model reads these files</strong> with every answer, reply and refresh in this chat. Long files are cut to their first 120,000 characters.</p>
+          <ul id="file-list" class="file-list"></ul>
+          <div id="files-err" class="field-err" hidden></div>
+          <button id="files-add" class="btn bordered" type="button">Add files to this chat</button>
         </div>
         <div id="pane-peek" class="pane" hidden></div>
       </aside>
@@ -122,6 +174,10 @@
       </div>
       <ul id="slash-menu" class="slash-menu" role="listbox" aria-label="Commands" hidden></ul>
       <form id="ask-form" class="composer-box" autocomplete="off">
+        <ul id="attach-list" class="attach-list" hidden aria-label="Attached files"></ul>
+        <button id="attach-btn" class="icon-btn attach-btn" type="button" title="Attach files: text, code, CSV, JSON, PDF, Word" aria-label="Attach files">
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11.5l-7.8 7.8a5 5 0 0 1-7.1-7.1l8.2-8.2a3.3 3.3 0 0 1 4.7 4.7l-8.2 8.2a1.7 1.7 0 0 1-2.4-2.4l7.5-7.5"/></svg>
+        </button>
         <label class="sr-only" for="ask-input">Ask a new question</label>
         <textarea id="ask-input" rows="1" placeholder="Ask a new question"></textarea>
         <button id="ask-send" class="send-btn" type="submit" aria-label="Send question">
@@ -237,7 +293,12 @@
     <dt><kbd>n</kbd></dt><dd>New chat</dd>
     <dt><kbd>b</kbd></dt><dd>Show or hide the sidebar</dd>
     <dt><kbd>v</kbd></dt><dd>Cycle Fit, Strip and Flow</dd>
-    <dt><kbd>d</kbd></dt><dd>Decisions</dd>
+    <dt><kbd>d</kbd></dt><dd>Decisions: rules the model follows</dd>
+    <dt><kbd>f</kbd></dt><dd>Files the model reads in this chat</dd>
+    <dt><kbd>N</kbd></dt><dd>Your notes on this chat</dd>
+    <dt><kbd>m</kbd> <kbd>p</kbd></dt><dd>Note on the card, pin a decision from it</dd>
+    <dt><kbd>A</kbd></dt><dd>Attach files to the next question</dd>
+    <dt><kbd>g</kbd> <kbd>/</kbd></dt><dd>Search chats</dd>
     <dt><kbd>/</kbd></dt><dd>Write a new question</dd>
     <dt><kbd>Esc</kbd></dt><dd>Leave an input or close a panel</dd>
     <dt><kbd>Shift</kbd>+<kbd>Enter</kbd></dt><dd>New line in a message</dd>
@@ -252,6 +313,12 @@
   </button>
 </form>
 
-<button id="ask-pop" class="ask-pop" type="button" hidden>Ask about this</button>
+<div id="ask-pop" class="ask-pop" hidden role="toolbar" aria-label="Selected text">
+  <button id="pop-ask" type="button">Ask about this</button>
+  <button id="pop-pin" type="button" title="Make this a rule the model follows">Pin as decision</button>
+  <button id="pop-note" type="button" title="Add to your private note on this card">Add to note</button>
+</div>
+<input id="file-input" type="file" multiple hidden>
+<div id="drop-zone" class="drop-zone" hidden><div class="drop-box"><strong>Drop files to attach</strong><span id="drop-sub">They go with your next question.</span></div></div>
 </body>
 </html>

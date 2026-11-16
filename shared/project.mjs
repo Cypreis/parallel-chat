@@ -3,8 +3,11 @@
 // See protocol.md for the event table this implements.
 
 export function createState() {
-  return { seq: 0, nodes: {}, order: [], edges: [], decisions: [] };
+  return { seq: 0, nodes: {}, order: [], edges: [], decisions: [], chatMeta: {}, groups: [], notes: {}, docs: [] };
 }
+
+// Fields a chat.meta patch may set.
+export const CHAT_META_FIELDS = ["title", "groupId", "pinned"];
 
 // Mutates and returns state. Events with seq <= state.seq are ignored, so
 // replaying a stream that overlaps what the client already has is safe.
@@ -18,6 +21,10 @@ export function applyEvent(state, event) {
       state.order = [];
       state.edges = [];
       state.decisions = [];
+      state.chatMeta = {};
+      state.groups = [];
+      state.notes = {};
+      state.docs = [];
       break;
     }
     case "node.open": {
@@ -68,14 +75,74 @@ export function applyEvent(state, event) {
       if (!d || !d.id) break;
       const decision = { ...d, affects: Array.isArray(d.affects) ? [...d.affects] : [] };
       state.decisions = state.decisions.filter((x) => x.id !== decision.id);
+      if (!("scope" in decision)) decision.scope = null;
       state.decisions.push(decision);
-      for (const cardId of decision.affects) {
-        const node = state.nodes[cardId];
-        if (node && node.kind === "card" && node.status === "settled") {
-          node.status = "stale";
-          node.staleBecause = decision.id;
-        }
+      markStale(state, decision);
+      break;
+    }
+    case "decision.patch": {
+      const d = state.decisions.find((x) => x.id === event.id);
+      if (!d || !event.patch) break;
+      const changed = typeof event.patch.text === "string" && event.patch.text !== d.text;
+      if (typeof event.patch.text === "string") d.text = event.patch.text;
+      if (Array.isArray(event.patch.affects)) d.affects = [...event.patch.affects];
+      // An edited (or re-aimed) decision marks the cards it affects out of date again.
+      if (changed || Array.isArray(event.patch.affects)) markStale(state, d);
+      break;
+    }
+    case "chat.meta": {
+      if (!event.chatId || !event.patch) break;
+      const meta = { ...(state.chatMeta[event.chatId] ?? {}) };
+      for (const k of CHAT_META_FIELDS) {
+        if (!(k in event.patch)) continue;
+        const v = event.patch[k];
+        if (v === null || v === undefined || v === "" || v === false) delete meta[k];
+        else meta[k] = v;
       }
+      if (Object.keys(meta).length) state.chatMeta[event.chatId] = meta;
+      else delete state.chatMeta[event.chatId];
+      break;
+    }
+    case "chat.delete": {
+      deleteChat(state, event.chatId);
+      break;
+    }
+    case "group.add": {
+      const g = event.group;
+      if (!g || !g.id || state.groups.some((x) => x.id === g.id)) break;
+      state.groups.push({ id: g.id, name: String(g.name ?? "") });
+      break;
+    }
+    case "group.patch": {
+      const g = state.groups.find((x) => x.id === event.id);
+      if (!g || !event.patch) break;
+      if (typeof event.patch.name === "string") g.name = event.patch.name;
+      break;
+    }
+    case "group.remove": {
+      state.groups = state.groups.filter((g) => g.id !== event.id);
+      for (const [chatId, meta] of Object.entries(state.chatMeta)) {
+        if (meta.groupId !== event.id) continue;
+        delete meta.groupId;
+        if (!Object.keys(meta).length) delete state.chatMeta[chatId];
+      }
+      break;
+    }
+    case "note.set": {
+      if (!event.targetId) break;
+      const text = String(event.text ?? "");
+      if (text.trim()) state.notes[event.targetId] = { text, ts: event.ts };
+      else delete state.notes[event.targetId];
+      break;
+    }
+    case "doc.add": {
+      const d = event.doc;
+      if (!d || !d.id || state.docs.some((x) => x.id === d.id)) break;
+      state.docs.push({ ...d });
+      break;
+    }
+    case "doc.remove": {
+      state.docs = state.docs.filter((d) => d.id !== event.id);
       break;
     }
     case "decision.unpin": {
@@ -93,6 +160,68 @@ export function applyEvent(state, event) {
       break;
   }
   return state;
+}
+
+function markStale(state, decision) {
+  for (const cardId of decision.affects) {
+    const node = state.nodes[cardId];
+    if (node && node.kind === "card" && node.status === "settled") {
+      node.status = "stale";
+      node.staleBecause = decision.id;
+    }
+  }
+}
+
+// Every node id of a chat: its questions and everything they hold.
+export function chatNodeIds(state, chatId) {
+  const chat = chats(state).find((c) => c.id === chatId);
+  if (!chat) return new Set();
+  const qids = new Set(chat.questions.map((q) => q.id));
+  const ids = new Set();
+  for (const id of state.order) {
+    const n = state.nodes[id];
+    if (n && (qids.has(n.id) || qids.has(n.turnId))) ids.add(id);
+  }
+  return ids;
+}
+
+// Remove a chat and everything only it owned: its nodes, the links touching
+// them, decisions scoped to it, its notes, documents and settings.
+function deleteChat(state, chatId) {
+  const ids = chatNodeIds(state, chatId);
+  if (!ids.size) return;
+  for (const id of ids) {
+    delete state.nodes[id];
+    delete state.notes[id];
+  }
+  state.order = state.order.filter((id) => !ids.has(id));
+  state.edges = state.edges.filter((e) => !ids.has(e.from) && !ids.has(e.to));
+  const gone = new Set(state.decisions.filter((d) => d.scope === chatId).map((d) => d.id));
+  state.decisions = state.decisions.filter((d) => !gone.has(d.id));
+  for (const id of state.order) {
+    const node = state.nodes[id];
+    if (node.status === "stale" && gone.has(node.staleBecause)) {
+      node.status = "settled";
+      delete node.staleBecause;
+    }
+  }
+  for (const d of state.decisions) {
+    d.affects = d.affects.filter((id) => !ids.has(id));
+    if (d.sourceNodeId && ids.has(d.sourceNodeId)) d.sourceNodeId = null;
+  }
+  state.docs = state.docs.filter((d) => d.chatId !== chatId);
+  delete state.chatMeta[chatId];
+}
+
+// Decisions that apply in a chat: those scoped to it plus those for every
+// chat (scope null), in pin order.
+export function decisionsFor(state, chatId) {
+  return state.decisions.filter((d) => !d.scope || d.scope === chatId);
+}
+
+// Documents attached to a chat, in the order they were added.
+export function docsOf(state, chatId) {
+  return state.docs.filter((d) => d.chatId === chatId);
 }
 
 function inOrder(state, predicate) {

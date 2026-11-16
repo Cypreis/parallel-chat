@@ -434,7 +434,7 @@ describe("end to end (mock provider)", () => {
     assert.equal(stream.events.at(-1).seq, last + 1);
     assert.deepEqual(stream.state.nodes, {});
     const st = await api(base, "GET", "/api/state");
-    assert.deepEqual(st.body, { seq: last + 1, nodes: {}, order: [], edges: [], decisions: [] });
+    assert.deepEqual(st.body, { seq: last + 1, nodes: {}, order: [], edges: [], decisions: [], chatMeta: {}, groups: [], notes: {}, docs: [] });
     const fresh = sse(base, { since: 0 });
     await fresh.ready;
     await fresh.waitFor((_, evs) => evs.length === 1, "fresh replay");

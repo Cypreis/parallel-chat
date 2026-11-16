@@ -499,7 +499,7 @@ describe("provider registry and /api/providers", () => {
     assert.equal((await api("POST", "/api/config", { provider: "qwen", model: "qwen-plus" })).status, 400, "no key");
     assert.equal((await api("POST", "/api/config", { provider: "nope", model: "x" })).status, 400);
     const r = await api("POST", "/api/config", { provider: "deepseek", model: "deepseek-flash" });
-    assert.deepEqual(r.body, { provider: "deepseek", model: "deepseek-flash", mode: "fanout", maxCards: 4 });
+    assert.deepEqual(r.body, { provider: "deepseek", model: "deepseek-flash", mode: "fanout", maxCards: 4, length: "auto" });
     assert.deepEqual((await api("GET", "/api/config")).body, r.body);
     assert.equal((await api("POST", "/api/config", { model: "my-typed-model" })).body.model, "my-typed-model");
     assert.equal((await api("POST", "/api/config", { model: "deepseek-flash", mode: "single" })).body.mode, "single");

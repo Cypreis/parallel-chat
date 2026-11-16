@@ -16,6 +16,8 @@ follow-up thread, so you can dig into one part without losing the others.
   A decision is a rule the model must follow, in one chat or in all of
   them. Pin one from a reply, a card or selected text, pick the cards it
   changes, and those are marked *Out of date* until you refresh them.
+- **Answer length.** Auto, Brief, Medium or Detailed, from the picker in
+  the message box or in Settings.
 - **Files.** Attach text, code, CSV, JSON, Markdown, PDF or Word files with
   the paperclip, by dropping them on the page or by pasting them. The model
   reads a chat's files with every answer and reply in that chat.

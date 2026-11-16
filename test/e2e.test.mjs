@@ -150,7 +150,7 @@ describe("end to end (mock provider)", () => {
 
   test("config, validation and static files", async () => {
     const cfg = await api(base, "GET", "/api/config");
-    assert.deepEqual(cfg, { status: 200, body: { provider: null, model: null, mode: "fanout", maxCards: 4 } });
+    assert.deepEqual(cfg, { status: 200, body: { provider: null, model: null, mode: "fanout", maxCards: 4, length: "auto" } });
     assert.equal((await api(base, "POST", "/api/config", { mode: "nope" })).status, 400);
     assert.equal((await api(base, "POST", "/api/config", { maxCards: 0 })).status, 400);
     assert.equal((await api(base, "POST", "/api/config", {})).status, 400);

@@ -26,11 +26,13 @@ import {
   chatNumber,
   describeContext,
   existingCards,
+  LENGTHS,
+  withLength,
 } from "./context.mjs";
 import { createFieldStreamer } from "./fields.mjs";
 import { CREATE_CARD, LINK_CARDS, PLAN_CARD, RELS, WRITE_BRANCH_CARD, WRITE_CARD, validateInput } from "./tools.mjs";
 
-export { RELS };
+export { RELS, LENGTHS };
 export const SHAPES = ["single", "parallel", "comparison", "steps"];
 export const MODES = ["single", "fanout"];
 export const MAX_CARDS = 6; // highest allowed maxCards
@@ -133,11 +135,12 @@ function parseInput(call, tool) {
 // provider: a fixed provider (tests); registry: the runtime-switchable one
 // (server/providers/registry.mjs). With a registry, each generation takes the
 // provider active when it starts and keeps it for every round.
-export function createEngine({ log, provider, registry = null, mode = "fanout", maxCards = DEFAULT_MAX_CARDS, logger = console }) {
+export function createEngine({ log, provider, registry = null, mode = "fanout", maxCards = DEFAULT_MAX_CARDS, length = "auto", logger = console }) {
   const acquire = registry ? () => registry.acquire() : () => provider;
   const config = {
     mode: MODES.includes(mode) ? mode : "fanout",
     maxCards: Number.isInteger(maxCards) && maxCards >= 1 && maxCards <= MAX_CARDS ? maxCards : DEFAULT_MAX_CARDS,
+    length: LENGTHS.includes(length) ? length : "auto",
   };
   const counters = { n: 0, e: 0, d: 0, g: 0, f: 0 };
   // A restored log: new ids continue after every id it holds (redacted events keep theirs in ref).
@@ -379,7 +382,7 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
 
   // ---------- a new question ----------
 
-  function answerHooks(qjob, { fanout, maxCards, question, provider }) {
+  function answerHooks(qjob, { fanout, maxCards, question, provider, length }) {
     const qid = qjob.nodeId;
     const tool = fanout ? PLAN_CARD : CREATE_CARD;
     const keys = new Map(); // key -> card id, for this answer
@@ -487,7 +490,7 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
       afterRound() {
         const batch = pendingWriters.splice(0).filter((call) => live(call.job));
         const prepared = batch.map((call) => {
-          const ctx = buildCardContext(log.state, call.cardId, { intents });
+          const ctx = withLength(buildCardContext(log.state, call.cardId, { intents }), length);
           const meta = {
             purpose: "card",
             question,
@@ -516,11 +519,11 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
     };
   }
 
-  async function runAnswer(qjob, question, { mode, maxCards, provider }) {
+  async function runAnswer(qjob, question, { mode, maxCards, provider, length }) {
     const qid = qjob.nodeId;
     const fanout = mode === "fanout";
-    const ctx = buildAskContext(log.state, qid, { maxCards, mode });
-    const hooks = answerHooks(qjob, { fanout, maxCards, question, provider });
+    const ctx = withLength(buildAskContext(log.state, qid, { maxCards, mode }), length);
+    const hooks = answerHooks(qjob, { fanout, maxCards, question, provider, length });
     const meta = {
       purpose: fanout ? "plan" : "turn",
       question,
@@ -891,17 +894,17 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
       chatId = first.id;
     }
     const docs = docList(body?.docs);
-    const { mode, maxCards } = config;
+    const { mode, maxCards, length } = config;
     const qid = openNode({ kind: "question", role: "user", body: text, status: "streaming", mode, chatId });
     // Attached files join the chat before its context is built.
     for (const d of docs) addDoc(chatId ?? qid, d);
     const job = startJob(qid);
-    track(runAnswer(job, text, { mode, maxCards, provider: acquire() }));
+    track(runAnswer(job, text, { mode, maxCards, length, provider: acquire() }));
     return { turnId: qid };
   }
 
   function startReply(card, text, quote) {
-    const ctx = buildContext(log.state, card.id, { text, quote });
+    const ctx = withLength(buildContext(log.state, card.id, { text, quote }), config.length);
     const info = describeContext(log.state, card.id);
     const userNodeId = openNode({
       kind: "message",
@@ -940,7 +943,7 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
     const quote = optionalText(body?.quote, "quote");
     const origin = quote ? { cardId: source.id, text, quote } : { cardId: source.id, text };
     const cardId = newId("n");
-    const ctx = buildBranchContext(log.state, source.id, { text, quote, cardId }); // before the card exists
+    const ctx = withLength(buildBranchContext(log.state, source.id, { text, quote, cardId }), config.length); // before the card exists
     openNode({
       id: cardId,
       kind: "card",
@@ -975,7 +978,7 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
     });
     const cardId = newId("n"); // used only if the model answers with a card
     // A pending message is left out of thread context, so it appears once, as the new question.
-    const ctx = buildFollowupContext(log.state, card.id, { text, quote, cardId });
+    const ctx = withLength(buildFollowupContext(log.state, card.id, { text, quote, cardId }), config.length);
     const job = startJob(userNodeId);
     job.followup = { path: null, card, text, quote, userNodeId, cardId };
     const meta = { purpose: "followup", ...describeContext(log.state, card.id), text, quote, cardId, sections: ctx.sections };
@@ -1002,9 +1005,12 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
       if (!cards.includes(card)) cards.push(card);
     }
     const first = cards[0];
-    const ctx = buildSynthesisContext(
-      log.state,
-      cards.map((c) => c.id),
+    const ctx = withLength(
+      buildSynthesisContext(
+        log.state,
+        cards.map((c) => c.id),
+      ),
+      config.length,
     );
     let title = `Synthesis: ${cards.map((c) => c.title).join(" + ")}`;
     if (title.length > 80) title = title.slice(0, 77).trimEnd() + "...";
@@ -1028,7 +1034,7 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
     const source = card.origin ? log.state.nodes[card.origin.cardId] : null;
     if (source?.kind === "card") {
       // A branch card answers its follow-up again, with the current decisions.
-      const ctx = buildBranchContext(log.state, source.id, { ...card.origin, cardId: card.id, refresh: true });
+      const ctx = withLength(buildBranchContext(log.state, source.id, { ...card.origin, cardId: card.id, refresh: true }), config.length);
       const prev = jobs.get(card.id);
       if (prev) {
         detach(prev);
@@ -1039,7 +1045,7 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
       track(runBranch(acquire(), job, ctx, branchMeta(source, card.origin, ctx, card.id, true)));
       return { cardId: card.id };
     }
-    const ctx = buildRefreshContext(log.state, card.id); // before node.reset clears the body
+    const ctx = withLength(buildRefreshContext(log.state, card.id), config.length); // before node.reset clears the body
     const meta = {
       purpose: "refresh",
       question: String(log.state.nodes[card.turnId]?.body ?? ""),
@@ -1271,7 +1277,7 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
 
   function getConfig() {
     const active = registry ? registry.activeConfig() : { provider: provider.name, model: provider.model };
-    return { provider: active.provider, model: active.model, mode: config.mode, maxCards: config.maxCards };
+    return { provider: active.provider, model: active.model, mode: config.mode, maxCards: config.maxCards, length: config.length };
   }
 
   // Everything is validated before anything is applied.
@@ -1280,7 +1286,9 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
     const hasMax = body?.maxCards !== undefined;
     const hasProvider = body?.provider !== undefined;
     const hasModel = body?.model !== undefined;
-    if (!hasMode && !hasMax && !hasProvider && !hasModel) throw new HttpError(400, "send mode, maxCards, provider and/or model");
+    const hasLength = body?.length !== undefined;
+    if (!hasMode && !hasMax && !hasProvider && !hasModel && !hasLength) throw new HttpError(400, "send mode, maxCards, length, provider and/or model");
+    if (hasLength && !LENGTHS.includes(body.length)) throw new HttpError(400, `length must be one of: ${LENGTHS.join(", ")}`);
     if (hasMode && !MODES.includes(body.mode)) throw new HttpError(400, `mode must be one of: ${MODES.join(", ")}`);
     if (hasMax && !(Number.isInteger(body.maxCards) && body.maxCards >= 1 && body.maxCards <= MAX_CARDS)) {
       throw new HttpError(400, `maxCards must be an integer from 1 to ${MAX_CARDS}`);
@@ -1292,6 +1300,7 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
     }
     if (hasMode) config.mode = body.mode;
     if (hasMax) config.maxCards = body.maxCards;
+    if (hasLength) config.length = body.length;
     if (next) registry.activate(next);
     return getConfig();
   }

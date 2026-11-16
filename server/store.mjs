@@ -1,7 +1,7 @@
 // Persistence: the event log as JSON lines and the settings as one JSON file.
 //
 //   <dir>/log.jsonl     one event per line, appended as events are logged
-//   <dir>/config.json   { provider, model, mode, maxCards }
+//   <dir>/config.json   { provider, model, mode, maxCards, length }
 //
 // Appends go through a short write queue: events logged within one flush
 // window are written together, one write at a time, so order is kept and a
@@ -128,8 +128,8 @@ export function createStore({ dir, logger = console }) {
       schedule();
     },
     saveConfig(config) {
-      const { provider, model, mode, maxCards } = config;
-      atomicWrite(configFile, JSON.stringify({ provider, model, mode, maxCards }, null, 2) + "\n");
+      const { provider, model, mode, maxCards, length } = config;
+      atomicWrite(configFile, JSON.stringify({ provider, model, mode, maxCards, length }, null, 2) + "\n");
     },
     // Write everything queued so far.
     async flush() {

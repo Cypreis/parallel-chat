@@ -237,6 +237,39 @@ function decisionNumber(state, decisionId, nodeId = null) {
   return i === -1 ? null : i + 1;
 }
 
+// ---------- answer length chosen by the user ----------
+
+export const LENGTHS = ["auto", "brief", "medium", "detailed"];
+
+const LENGTH_RULE = {
+  brief:
+    "Keep it brief. A card body is at most about 80 words: the answer and the one or two facts that matter, no preamble. A reply in a thread is one to three sentences. Prefer fewer cards; one card is often enough.",
+  medium:
+    "Aim for a medium length. A card body is about 150 to 300 words. A reply in a thread is one short paragraph.",
+  detailed:
+    "Be thorough. A card body may run 400 to 800 words, with examples, tables or code where they help. A reply in a thread may take several paragraphs. Use the cards the question deserves, up to the limit.",
+};
+
+// The length the user picked, as a block placed after the cache breakpoint.
+// "auto" (the default) adds nothing: the system prompt's own length rule applies.
+export function lengthBlock(length) {
+  const rule = LENGTH_RULE[length];
+  if (!rule) return "";
+  return `<length setting="${length}">\nThe user chose this answer length in the settings. ${rule} It overrides the length guidance above; a question that explicitly asks for another length still wins.\n</length>`;
+}
+
+// Add the length block to a built context: a text block at the end of the
+// last user message (every builder ends with one), and a section for it.
+export function withLength(ctx, length) {
+  const block = lengthBlock(length);
+  if (!block) return ctx;
+  const messages = ctx.messages.map((m) => ({ ...m, content: Array.isArray(m.content) ? [...m.content] : m.content }));
+  const last = messages[messages.length - 1];
+  if (last && last.role === "user" && Array.isArray(last.content)) last.content.push(text(block));
+  else messages.push({ role: "user", content: [text(block)] });
+  return { ...ctx, messages, sections: [...ctx.sections, section("length", block.length)] };
+}
+
 // Long documents are cut so one chat cannot blow the context window.
 export const DOC_CHARS = 120_000;
 export const DOCS_TOTAL_CHARS = 240_000;

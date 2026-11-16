@@ -218,6 +218,47 @@ describe("API", () => {
     }
   });
 
+  test("answer length: set, validated, sent to every kind of call, and saved", async () => {
+    const dir = path.join(mkdtempSync(path.join(tmpdir(), "pc-len-")), ".data");
+    dirs.push(path.dirname(dir));
+    let app = await start(dir);
+    try {
+      assert.equal((await call(app, "GET", "/api/config")).body.length, "auto");
+      assert.equal((await call(app, "POST", "/api/config", { length: "huge" })).status, 400);
+      const set = await call(app, "POST", "/api/config", { length: "brief" });
+      assert.equal(set.body.length, "brief");
+      // record what each model call is sent
+      const seen = [];
+      const stream = app.registry.fallback.stream.bind(app.registry.fallback);
+      app.registry.fallback.stream = (req) => {
+        seen.push({ purpose: req.meta.purpose, brief: JSON.stringify(req.messages).includes('<length setting=\\"brief\\">') });
+        return stream(req);
+      };
+      const q = (await call(app, "POST", "/api/ask", { text: "Pick a queue" })).body.turnId;
+      await app.engine.idle();
+      const card = cardsOf(app.log.state, q)[0];
+      await call(app, "POST", `/api/nodes/${card.id}/reply`, { text: "Why?" });
+      await call(app, "POST", `/api/nodes/${card.id}/refresh`);
+      await app.engine.idle();
+      assert.ok(seen.length >= 3);
+      assert.deepEqual(seen.filter((x) => !x.brief), [], "every call carries the brief rule");
+      await call(app, "POST", "/api/config", { length: "auto" });
+      seen.length = 0;
+      await call(app, "POST", `/api/nodes/${card.id}/reply`, { text: "And?" });
+      await app.engine.idle();
+      assert.ok(!JSON.stringify(seen).includes("true"), "auto adds nothing");
+      await call(app, "POST", "/api/config", { length: "detailed" });
+    } finally {
+      await app.close();
+    }
+    app = await start(dir);
+    try {
+      assert.equal(app.engine.getConfig().length, "detailed", "restored after a restart");
+    } finally {
+      await app.close();
+    }
+  });
+
   test("deleting a chat removes it, erases it from the stored log, and survives a restart", async () => {
     const dir = path.join(mkdtempSync(path.join(tmpdir(), "pc-lib-")), ".data");
     dirs.push(path.dirname(dir));

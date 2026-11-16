@@ -4,7 +4,7 @@ import { networkInterfaces } from "node:os";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createEngine, HttpError, MAX_CARDS, MODES } from "./engine.mjs";
+import { createEngine, HttpError, LENGTHS, MAX_CARDS, MODES } from "./engine.mjs";
 import { createStore } from "./store.mjs";
 import { createLog } from "./log.mjs";
 import { createRegistry } from "./providers/registry.mjs";
@@ -168,6 +168,7 @@ export async function startServer({
     const base = {};
     if (MODES.includes(saved.mode)) base.mode = saved.mode;
     if (Number.isInteger(saved.maxCards) && saved.maxCards >= 1 && saved.maxCards <= MAX_CARDS) base.maxCards = saved.maxCards;
+    if (LENGTHS.includes(saved.length)) base.length = saved.length;
     if (Object.keys(base).length) engine.setConfig(base);
     if (typeof saved.provider !== "string") return;
     try {

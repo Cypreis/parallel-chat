@@ -111,8 +111,8 @@ Every write returns as soon as the first events are logged; content arrives on t
 | --- | --- | --- | --- |
 | `GET /api/events` | `Last-Event-ID` header or `?since=<seq>` | SSE | replay events after `since`, then live |
 | `GET /api/state` | | projected state | debugging and tests |
-| `GET /api/config` | | `{ provider: "anthropic" \| "deepseek" \| "qwen" \| null, model, mode, maxCards }` | `provider` and `model` are null until a key is added |
-| `POST /api/config` | `{ mode?: "single" \| "fanout", maxCards?: 1..6 }` | config | settings for new turns; either field may be sent alone |
+| `GET /api/config` | | `{ provider: "anthropic" \| "deepseek" \| "qwen" \| null, model, mode, maxCards, length }` | `provider` and `model` are null until a key is added |
+| `POST /api/config` | `{ mode?: "single" \| "fanout", maxCards?: 1..6, length?: "auto" \| "brief" \| "medium" \| "detailed" }` | config | settings for new work; any field may be sent alone |
 | `POST /api/ask` | `{ text }` | 202 `{ turnId }` | new turn: question node, then cards stream in |
 | `POST /api/nodes/:cardId/reply` | `{ text, quote? }` | 202 `{ userNodeId, assistantNodeId }` | follow-up in that card's thread |
 | `POST /api/broadcast` | `{ cardIds, text }` | 202 `{ replies: [{ cardId, userNodeId, assistantNodeId }] }` | same follow-up in several threads, answered concurrently |
@@ -233,6 +233,15 @@ files) is replaced in the log by `{ seq, ts, type: "redacted", ref }`, and
 the stored `log.jsonl` is rewritten. Seqs stay contiguous, so a page that
 reconnects keeps its place, and `ref` keeps the id so ids are never reused
 after a restart.
+
+**Answer length.** `length` (default `auto`) is the length the user wants.
+For any other value, every model call (new answer, fan-out writer, reply,
+branch, follow-up, synthesis, refresh) ends with a `<length setting="…">`
+block placed after the cache breakpoint, so the cached prefix does not
+change: `brief` is about 80 words a card and replies of one to three
+sentences, `medium` 150 to 300 words a card, `detailed` 400 to 800 words
+with examples. A question that asks for another length still wins. `auto`
+adds nothing. It is saved in `config.json` with the other settings.
 
 ## Persistence
 

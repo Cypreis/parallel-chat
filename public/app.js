@@ -145,6 +145,7 @@ const els = {
   decSrc: $('dec-src'), decFormH: $('dec-form-h'), decAffects: $('dec-affects'), decAffList: $('dec-aff-list'), decAffAll: $('dec-aff-all'), decAffNone: $('dec-aff-none'),
   decSubmit: $('dec-submit'), decCancel: $('dec-cancel'),
   popAsk: $('pop-ask'), popPin: $('pop-pin'), popNote: $('pop-note'),
+  lenBtn: $('len-btn'), lenLabel: $('len-label'),
 };
 
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
@@ -2934,6 +2935,16 @@ function renderSettings() {
     setClass(b, 'on', on);
     setAttr(b, 'aria-checked', String(on));
   }
+  const length = ui.config.length || 'auto';
+  for (const b of els.settings.querySelectorAll('[data-length]')) {
+    const on = b.dataset.length === length;
+    setClass(b, 'on', on);
+    setAttr(b, 'aria-checked', String(on));
+  }
+  setText(els.lenLabel, LENGTH_LABEL[length] || 'Auto');
+  setClass(els.lenBtn, 'set', length !== 'auto');
+  const lenTip = 'Answer length: ' + (LENGTH_LABEL[length] || 'Auto') + ' (L)';
+  if (els.lenBtn.title !== lenTip) els.lenBtn.title = lenTip;
   for (const b of els.maxSeg.children) {
     const on = Number(b.dataset.max) === Number(maxCards);
     setClass(b, 'on', on);
@@ -3145,6 +3156,23 @@ for (let i = 1; i <= 6; i++) {
     if (c) { ui.config = { ...ui.config, ...c }; schedule(); }
   } }));
 }
+// answer length: Settings and the composer's picker set the same server setting
+const LENGTHS = [
+  { id: 'auto', label: 'Auto', note: 'Matched to each question' },
+  { id: 'brief', label: 'Brief', note: 'About 80 words a card' },
+  { id: 'medium', label: 'Medium', note: '150 to 300 words a card' },
+  { id: 'detailed', label: 'Detailed', note: '400 to 800 words, with examples' },
+];
+const LENGTH_LABEL = Object.fromEntries(LENGTHS.map((l) => [l.id, l.label]));
+async function setLength(id) {
+  const c = await api('POST', '/api/config', { length: id });
+  if (c) { ui.config = { ...ui.config, ...c }; schedule(); toast('Answer length: ' + LENGTH_LABEL[id]); }
+}
+for (const b of els.settings.querySelectorAll('[data-length]')) b.addEventListener('click', () => setLength(b.dataset.length));
+els.lenBtn.addEventListener('click', () => openMenu(els.lenBtn, [
+  { heading: 'Answer length' },
+  ...LENGTHS.map((l) => ({ label: `${l.label} · ${l.note}`, checked: (ui.config.length || 'auto') === l.id, run: () => setLength(l.id) })),
+]));
 for (const b of els.settings.querySelectorAll('[data-mode]')) {
   b.addEventListener('click', async () => {
     const c = await api('POST', '/api/config', { mode: b.dataset.mode });
@@ -3565,7 +3593,9 @@ cmd({ id: 'sidebar', title: 'Show or hide the sidebar', group: 'View', keys: ['b
 cmd({ id: 'decisions', title: 'Decisions: rules the model follows', group: 'View', keys: ['d'], names: ['decisions'], slash: 'decisions', run: () => openDrawer({ kind: 'decisions' }) });
 cmd({ id: 'files', title: 'Files the model reads in this chat', group: 'View', keys: ['f'], names: ['files', 'documents'], slash: 'files', when: inChatNow, run: () => openDrawer({ kind: 'files' }) });
 cmd({ id: 'notes', title: 'Notes on this chat (private)', group: 'View', keys: ['N'], names: ['notes'], slash: 'notes', when: inChatNow, run: () => openDrawer({ kind: 'notes' }) });
-cmd({ id: 'attach', title: 'Attach files to the next question', group: 'Write', keys: ['A'], names: ['attach', 'upload'], slash: 'attach', run: () => { fileTarget = 'composer'; els.fileInput.click(); } });
+cmd({ id: 'length', title: 'Answer length', group: 'Write', keys: ['L'], names: ['length', 'short', 'long'], slash: 'length', run: () => els.lenBtn.click() });
+for (const l of ['brief', 'medium', 'detailed', 'auto']) cmd({ id: 'length.' + l, title: 'Answer length: ' + l[0].toUpperCase() + l.slice(1), group: 'Write', keys: [], names: [l], hidden: true, run: () => setLength(l) });
+cmd({ id: 'attach',title: 'Attach files to the next question', group: 'Write', keys: ['A'], names: ['attach', 'upload'], slash: 'attach', run: () => { fileTarget = 'composer'; els.fileInput.click(); } });
 cmd({ id: 'card.note', title: 'Note on the current card', group: 'Cards', keys: ['m'], names: ['note'], when: () => !!curCard(), run: () => { const v = cardViews.get(curCard()); if (v) toggleNote(v); } });
 cmd({ id: 'card.pin', title: 'Pin a decision from the current card', group: 'Cards', keys: ['p'], names: ['pin'], when: () => !!curCard(), run: () => { const c = state.nodes[curCard()]; if (c) openPinDraft(firstSentence(c.summary || c.body || ''), c.id); } });
 cmd({ id: 'chat.search', title: 'Search chats', group: 'Chats', keys: ['g /'], names: ['search', 'find'], slash: 'search', run: () => { if (sideMode() !== 'open') { ui.overlay = true; schedule(); } requestAnimationFrame(() => requestAnimationFrame(() => els.chatSearch.focus())); } });

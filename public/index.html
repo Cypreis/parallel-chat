@@ -180,6 +180,7 @@
         </button>
         <label class="sr-only" for="ask-input">Ask a new question</label>
         <textarea id="ask-input" rows="1" placeholder="Ask a new question"></textarea>
+        <button id="len-btn" class="len-btn" type="button" aria-haspopup="menu" aria-expanded="false" title="Answer length (L)"><span id="len-label">Auto</span></button>
         <button id="ask-send" class="send-btn" type="submit" aria-label="Send question">
           <svg class="ic-up" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/></svg><svg class="ic-stop" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2.5" fill="currentColor"/></svg>
         </button>
@@ -216,6 +217,15 @@
       </section>
       <section class="set-sec">
         <h3>Answers</h3>
+        <div class="set-row"><span>Answer length</span>
+          <div id="len-seg" class="seg" role="radiogroup" aria-label="Answer length">
+            <button type="button" role="radio" aria-checked="false" data-length="auto" title="The model matches the length to each question">Auto</button>
+            <button type="button" role="radio" aria-checked="false" data-length="brief" title="Cards of about 80 words, replies of a few sentences">Brief</button>
+            <button type="button" role="radio" aria-checked="false" data-length="medium" title="Cards of about 150 to 300 words, replies of a paragraph">Medium</button>
+            <button type="button" role="radio" aria-checked="false" data-length="detailed" title="Cards of 400 to 800 words with examples, longer replies">Detailed</button>
+          </div>
+        </div>
+        <p class="muted set-note">Applies to new answers, replies and refreshes. A question that asks for another length still gets it.</p>
         <div class="set-row"><span>Maximum cards per answer</span><div id="max-seg" class="seg" role="radiogroup" aria-label="Maximum cards"></div></div>
         <div class="set-row"><span>Generation</span>
           <div class="seg" role="radiogroup" aria-label="Generation mode">

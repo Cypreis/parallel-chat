@@ -274,7 +274,9 @@ chooses a model from the list the server fetched with that key. A key goes
 from the page to this server only, is never sent back to the page, never
 logged, and never put in the event log.
 
-Provider ids: `anthropic`, `deepseek`, `qwen`. With no key, no provider is
+Provider ids: `anthropic`, `deepseek`, `qwen`, `opencode`, `chatgpt`.
+`chatgpt` has no key: the user signs in (OAuth with PKCE, Codex CLI's client)
+and the resulting tokens are handled like a key. With no key, no provider is
 active (`provider: null`) and every generation fails at once with "No model is
 connected yet. Open Settings and add an API key…", so the page can send the
 user to Settings. Nothing is ever made up locally.
@@ -284,9 +286,13 @@ user to Settings. Nothing is ever made up locally.
 {
   id: "deepseek",
   label: "DeepSeek",
+  auth: "key" | "oauth",       // "oauth": signed in (chatgpt), never given a key
   needsKey: true,
-  hasKey: true,
-  keyHint: "…9f2c" | null,     // last 4 characters only
+  hasKey: true,                // for chatgpt: signed in
+  keyHint: "…9f2c" | null,     // last 4 characters only; null for chatgpt
+  account: { email, plan } | null,                  // chatgpt only, when signed in
+  login: { pending, url, callback, error } | null,  // chatgpt only: the sign-in in progress
+                               // (callback false: port 1455 was busy, paste the address instead)
   keySource: "page" | "file" | "env" | null,   // where the key in use came from
   remembered: false,           // true when it is saved in .keys.json
   regions: [{ id: "intl", label: "Singapore (international)" }, ...] | null,  // qwen only
@@ -304,6 +310,9 @@ user to Settings. Nothing is ever made up locally.
 | `POST /api/providers/:id/key` | `{ apiKey, region?, baseURL?, remember? }` | 200 `{ provider: ProviderInfo }` | checks the key by fetching the model list; stores the key in memory, and in `.keys.json` when `remember` is true. 400 `{ error }` when the provider rejects the key (nothing is stored) |
 | `POST /api/providers/:id/models` | | 200 `{ provider: ProviderInfo }` | fetch the model list again with the stored key |
 | `DELETE /api/providers/:id/key` | | 200 `{ provider: ProviderInfo }` | forget the key (memory and file). If that provider was active, no provider is active until another is chosen |
+| `POST /api/providers/chatgpt/login` | `{ remember? }` | 200 `{ provider }` | start a sign-in: listens on `localhost:1455/auth/callback` and returns `login.url` for the page to open. Starting again replaces the earlier one. Times out after 10 minutes |
+| `POST /api/providers/chatgpt/login/complete` | `{ url }` | 200 `{ provider }` | finish a sign-in from the address the browser ended on (or its query string, or the bare code). 400 when the code or state is wrong |
+| `DELETE /api/providers/chatgpt/login` | | 200 `{ provider }` | cancel a sign-in in progress. Sign out with `DELETE /api/providers/chatgpt/key` |
 | `POST /api/config` | adds `{ provider?, model? }` | config | switch provider and model for new work. 400 when the provider has no key, or `model` is missing for a provider that needs one. `model` may be any non-empty string, so a model missing from the list can be typed |
 
 Rules:

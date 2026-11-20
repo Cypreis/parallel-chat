@@ -1,11 +1,17 @@
-// Provider registry: the three providers, their keys, cached model lists, the
+// Provider registry: the providers, their keys, cached model lists, the
 // model last chosen for each, and which one is active.
 //
 // Keys, highest priority first: posted from the page (memory); .keys.json in
 // the app folder (written only when the page asks to remember);
 // environment (ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN, DEEPSEEK_API_KEY,
-// DASHSCOPE_API_KEY with DASHSCOPE_REGION). A key is never logged, never
-// returned (only its last four characters), and scrubbed from upstream errors.
+// DASHSCOPE_API_KEY with DASHSCOPE_REGION, OPENCODE_API_KEY). A key is never
+// logged, never returned (only its last four characters), and scrubbed from
+// upstream errors.
+//
+// ChatGPT has no key: the page starts a sign-in (startLogin) and the tokens
+// it ends with are kept like a key (memory, or .keys.json when remembered),
+// refreshed shortly before they expire, and never returned to the page (only
+// the account's email and plan).
 //
 // Startup calls no upstream API: a key from the file or the environment gives
 // hasKey true with models null until the page asks for the list.
@@ -26,24 +32,42 @@ import { fileURLToPath } from "node:url";
 import { HttpError } from "../engine.mjs";
 import { createAnthropicProvider, listAnthropicModels } from "./anthropic.mjs";
 import {
+  CHATGPT_API_BASE,
+  CHATGPT_ISSUER,
+  createChatGPTLogin,
+  createChatGPTProvider,
+  createCodexPromptLoader,
+  credentialSecrets,
+  listChatGPTModels,
+  readCredential,
+  refreshCredential,
+} from "./chatgpt.mjs";
+import {
   createOpenAICompatProvider,
   DEEPSEEK_BASE,
   isAuthError,
   listDeepSeekModels,
+  listOpenCodeModels,
   listQwenModels,
+  OPENCODE_BASE,
+  OPENCODE_MODELS_URL,
   QWEN_REGIONS,
   scrub,
 } from "./openai-compat.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const DEFAULT_KEYS_FILE = path.join(ROOT, ".keys.json");
-export const PROVIDER_IDS = ["anthropic", "deepseek", "qwen"];
+export const PROVIDER_IDS = ["anthropic", "deepseek", "qwen", "opencode", "chatgpt"];
+const OAUTH = new Set(["chatgpt"]); // signed in, not given a key
 const LABELS = {
   anthropic: "Anthropic",
   deepseek: "DeepSeek",
   qwen: "Qwen (Alibaba Cloud Model Studio)",
+  opencode: "OpenCode (Zen)",
+  chatgpt: "ChatGPT (sign in with your plan)",
 };
-const SHORT = { anthropic: "Anthropic", deepseek: "DeepSeek", qwen: "Qwen" };
+const SHORT = { anthropic: "Anthropic", deepseek: "DeepSeek", qwen: "Qwen", opencode: "OpenCode", chatgpt: "ChatGPT" };
+const REFRESH_MARGIN_MS = 5 * 60 * 1000;
 const ANTHROPIC_DEFAULT_MODEL = "claude-opus-5-5";
 
 // Last four characters only; nothing for a key too short to hide the rest.
@@ -70,7 +94,7 @@ export function validateBaseURL(raw) {
 
 const qwenRegion = (id) => QWEN_REGIONS.find((r) => r.id === id);
 
-export const NO_KEY_MESSAGE = "No model is connected yet. Open Settings and add an API key for Anthropic, DeepSeek or Qwen.";
+export const NO_KEY_MESSAGE = "No model is connected yet. Open Settings and sign in with ChatGPT, or add an API key for Anthropic, DeepSeek, Qwen or OpenCode.";
 
 // What answers while no provider has a key: every call fails with NO_KEY_MESSAGE.
 export function createUnconfiguredProvider() {
@@ -88,7 +112,9 @@ export function createRegistry({
   env = process.env,
   keysFile = DEFAULT_KEYS_FILE,
   fallback = null, // the provider used while none has a key (tests pass a scripted one)
-  endpoints = {}, // test hooks: { deepseek: baseURL, anthropic: baseURL }
+  // test hooks: { deepseek, anthropic, opencode, opencodeModels, chatgptAuth (issuer),
+  //   chatgpt (backend base), chatgptCallbackPort, codexPrompt (model) => text }
+  endpoints = {},
   fetch: doFetch = globalThis.fetch,
   logger = console,
 } = {}) {
@@ -117,6 +143,14 @@ export function createRegistry({
     entries.anthropic.env = { apiKey: env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN, fromEnv: true };
   }
   if (env.DEEPSEEK_API_KEY) entries.deepseek.env = { apiKey: env.DEEPSEEK_API_KEY };
+  if (env.OPENCODE_API_KEY) entries.opencode.env = { apiKey: env.OPENCODE_API_KEY };
+  const opencodeBase = endpoints.opencode ?? OPENCODE_BASE;
+  const opencodeModels = endpoints.opencodeModels ?? OPENCODE_MODELS_URL;
+  const chatgptIssuer = endpoints.chatgptAuth ?? CHATGPT_ISSUER;
+  const chatgptBase = endpoints.chatgpt ?? CHATGPT_API_BASE;
+  const loadCodexPrompt = endpoints.codexPrompt ?? createCodexPromptLoader({ fetch: doFetch });
+  const chatgptQuirks = { needsCodexPrompt: false };
+  const refreshing = new WeakMap(); // credential -> in-flight refresh
   if (env.DASHSCOPE_API_KEY) {
     const region = qwenRegion(env.DASHSCOPE_REGION)?.baseURL ? env.DASHSCOPE_REGION : "intl";
     entries.qwen.env = { apiKey: env.DASHSCOPE_API_KEY, region, baseURL: null };
@@ -148,6 +182,12 @@ export function createRegistry({
   }
 
   for (const [id, saved] of Object.entries(readKeysFile())) {
+    if (OAUTH.has(id)) {
+      const oauth = readCredential(saved?.oauth);
+      if (oauth) entries[id].file = { oauth };
+      else logger.warn?.(`[providers] ignoring the saved ${id} sign-in in .keys.json (incomplete)`);
+      continue;
+    }
     if (!entries[id] || typeof saved?.apiKey !== "string" || !saved.apiKey) continue;
     try {
       const baseURL = id === "qwen" && saved.baseURL ? validateBaseURL(saved.baseURL) : null;
@@ -169,8 +209,100 @@ export function createRegistry({
 
   function allKeys() {
     const keys = [];
-    for (const id of PROVIDER_IDS) for (const s of ["page", "file", "env"]) if (entries[id][s]?.apiKey) keys.push(entries[id][s].apiKey);
+    for (const id of PROVIDER_IDS) {
+      for (const s of ["page", "file", "env"]) {
+        if (entries[id][s]?.apiKey) keys.push(entries[id][s].apiKey);
+        keys.push(...credentialSecrets(entries[id][s]?.oauth));
+      }
+    }
     return keys;
+  }
+
+  // ---------- ChatGPT sign-in ----------
+
+  const login = createChatGPTLogin({
+    issuer: chatgptIssuer,
+    port: endpoints.chatgptCallbackPort,
+    fetch: doFetch,
+    logger,
+    onSuccess: async (oauth, { remember }) => {
+      const e = entries.chatgpt;
+      e.page = { oauth };
+      e.forgotten = false;
+      const saved = readKeysFile();
+      if (remember) {
+        saved.chatgpt = { oauth };
+        writeKeysFile(saved);
+        e.file = e.page;
+      } else if (saved.chatgpt || e.file) {
+        delete saved.chatgpt;
+        writeKeysFile(saved);
+        e.file = null;
+      }
+      logger.log?.(`[providers] chatgpt: signed in${remember ? " and saved to .keys.json" : ""}`);
+      // The model list is a convenience: a failure here does not undo the sign-in.
+      try {
+        const { models, modelsError } = await listChatGPTModels({ baseURL: chatgptBase, cred: oauth, fetch: doFetch });
+        e.models = models;
+        e.modelsError = modelsError;
+      } catch (err) {
+        e.models = null;
+        e.modelsError = scrub(err?.message ?? err, ...allKeys());
+      }
+    },
+  });
+
+  // A credential that is valid for at least a few more minutes; refreshes it
+  // in place (and in .keys.json when it came from there) otherwise.
+  async function freshCredential(oauth, { force = false } = {}) {
+    if (!force && oauth.accessToken && oauth.expiresAt - Date.now() > REFRESH_MARGIN_MS) return oauth;
+    if (!refreshing.has(oauth)) {
+      const p = (async () => {
+        const next = await refreshCredential(oauth, { issuer: chatgptIssuer, fetch: doFetch });
+        Object.assign(oauth, next);
+        const e = entries.chatgpt;
+        if (e.file?.oauth === oauth) {
+          const saved = readKeysFile();
+          saved.chatgpt = { oauth };
+          writeKeysFile(saved);
+        }
+        return oauth;
+      })().finally(() => refreshing.delete(oauth));
+      refreshing.set(oauth, p);
+    }
+    try {
+      return await refreshing.get(oauth);
+    } catch (err) {
+      if (err?.status === 400 || err?.status === 401) {
+        throw new HttpError(400, "ChatGPT: the sign-in has expired or was revoked. Sign out and sign in again in Settings.");
+      }
+      throw err;
+    }
+  }
+
+  function startLogin(id, body = {}, { appURL = null } = {}) {
+    requireProvider(id);
+    if (!OAUTH.has(id)) throw new HttpError(400, `${SHORT[id]} uses an API key, not a sign-in`);
+    if (body.remember !== undefined && typeof body.remember !== "boolean") throw new HttpError(400, "remember must be true or false");
+    return login.start({ remember: body.remember === true, appURL }).then(() => info(id));
+  }
+
+  async function completeLogin(id, body = {}) {
+    requireProvider(id);
+    if (!OAUTH.has(id)) throw new HttpError(400, `${SHORT[id]} uses an API key, not a sign-in`);
+    if (typeof body.url !== "string" || !body.url.trim()) throw new HttpError(400, "url is required: paste the address the browser ended on");
+    try {
+      await login.complete(body.url);
+    } catch (err) {
+      throw new HttpError(400, scrub(err?.message ?? err, ...allKeys()));
+    }
+    return info(id);
+  }
+
+  function cancelLogin(id) {
+    requireProvider(id);
+    if (OAUTH.has(id)) login.cancel();
+    return info(id);
   }
 
   function qwenBase(cred) {
@@ -192,12 +324,16 @@ export function createRegistry({
   function info(id) {
     const e = entries[id];
     const cred = current(id);
+    const oauth = OAUTH.has(id);
     return {
       id,
       label: LABELS[id],
+      auth: oauth ? "oauth" : "key",
       needsKey: true,
       hasKey: !!cred,
-      keyHint: cred ? keyHint(cred.apiKey) : null,
+      keyHint: cred && !oauth ? keyHint(cred.apiKey) : null,
+      account: oauth && cred ? { email: cred.oauth.email, plan: cred.oauth.plan } : null,
+      login: oauth ? login.status() : null,
       keySource: cred ? cred.source : null,
       remembered: !!e.file,
       regions: id === "qwen" ? QWEN_REGIONS.map(({ id: rid, label }) => ({ id: rid, label })) : null,
@@ -218,6 +354,18 @@ export function createRegistry({
   async function fetchModels(id, cred) {
     const keyForCall = cred.fromEnv ? undefined : cred.apiKey;
     try {
+      if (id === "chatgpt") {
+        return await listChatGPTModels({ baseURL: chatgptBase, cred: await freshCredential(cred.oauth), fetch: doFetch });
+      }
+      if (id === "opencode") {
+        try {
+          const models = await listOpenCodeModels({ modelsURL: opencodeModels, apiKey: cred.apiKey, fetch: doFetch });
+          return { models, modelsError: null };
+        } catch (err) {
+          if (isAuthError(err)) throw err;
+          return { models: null, modelsError: `${err.message}. Type a model id instead.` };
+        }
+      }
       if (id === "deepseek") {
         try {
           const models = await listDeepSeekModels({ baseURL: endpoints.deepseek ?? DEEPSEEK_BASE, apiKey: cred.apiKey, fetch: doFetch });
@@ -243,6 +391,7 @@ export function createRegistry({
 
   async function setKey(id, body) {
     requireProvider(id);
+    if (OAUTH.has(id)) throw new HttpError(400, `${SHORT[id]} has no API key: sign in instead (POST /api/providers/${id}/login)`);
     const apiKey = typeof body?.apiKey === "string" ? body.apiKey.trim() : "";
     if (!apiKey) throw new HttpError(400, "apiKey is required");
     if (/\s/.test(apiKey)) throw new HttpError(400, "apiKey must not contain spaces");
@@ -292,7 +441,7 @@ export function createRegistry({
   async function refreshModels(id) {
     requireProvider(id);
     const cred = current(id);
-    if (!cred) throw new HttpError(400, `${SHORT[id]} has no API key`);
+    if (!cred) throw new HttpError(400, OAUTH.has(id) ? `${SHORT[id]} is not signed in` : `${SHORT[id]} has no API key`);
     const { models, modelsError } = await fetchModels(id, cred);
     entries[id].models = models;
     entries[id].modelsError = modelsError;
@@ -302,6 +451,7 @@ export function createRegistry({
   function deleteKey(id) {
     requireProvider(id);
     const e = entries[id];
+    if (OAUTH.has(id)) login.cancel();
     e.page = null;
     if (e.file) {
       const saved = readKeysFile();
@@ -324,7 +474,7 @@ export function createRegistry({
     if (typeof id !== "string" || !PROVIDER_IDS.includes(id)) {
       throw new HttpError(400, `provider must be one of: ${PROVIDER_IDS.join(", ")}`);
     }
-    if (!current(id)) throw new HttpError(400, `${SHORT[id]} has no API key; add one first`);
+    if (!current(id)) throw new HttpError(400, OAUTH.has(id) ? `${SHORT[id]} is not signed in; sign in first` : `${SHORT[id]} has no API key; add one first`);
     if (id === "anthropic" && sdkAvailable === false) throw new HttpError(400, "The Anthropic SDK is not installed");
     if (model !== undefined && (typeof model !== "string" || !model.trim())) throw new HttpError(400, "model must be a non-empty string");
     const chosen = model?.trim() || entries[id].model;
@@ -367,11 +517,23 @@ export function createRegistry({
         },
       };
     }
+    if (id === "chatgpt") {
+      const oauth = cred.oauth;
+      return createChatGPTProvider({
+        model,
+        baseURL: chatgptBase,
+        getCredential: () => freshCredential(oauth),
+        refresh: () => freshCredential(oauth, { force: true }),
+        loadCodexPrompt,
+        quirks: chatgptQuirks,
+        fetch: doFetch,
+      });
+    }
     const e = entries[id];
     return createOpenAICompatProvider({
       id,
       label: SHORT[id],
-      baseURL: id === "qwen" ? qwenBase(cred) : (endpoints.deepseek ?? DEEPSEEK_BASE),
+      baseURL: id === "qwen" ? qwenBase(cred) : id === "opencode" ? opencodeBase : (endpoints.deepseek ?? DEEPSEEK_BASE),
       apiKey: cred.apiKey,
       model,
       maxOutput: e.models?.find((m) => m.id === model)?.maxOutput,
@@ -385,7 +547,7 @@ export function createRegistry({
     const present = PROVIDER_IDS.filter((id) => current(id)).map((id) => `${id} (${current(id).source})`);
     if (present.length) logger.log?.(`[providers] keys available: ${present.join(", ")}`);
     if (!current("anthropic")) {
-      logger.log?.("[provider] none yet: add an API key in the app (Settings) or in .env");
+      logger.log?.("[provider] none yet: sign in with ChatGPT or add an API key in the app (Settings), or put a key in .env");
       return;
     }
     if (!(await sdkOK())) {
@@ -396,5 +558,21 @@ export function createRegistry({
     logger.log?.(`[provider] anthropic (${active.model})`);
   }
 
-  return { init, list, info, setKey, refreshModels, deleteKey, check, activate, activeConfig, acquire, fallback: fallbackProvider };
+  return {
+    init,
+    list,
+    info,
+    setKey,
+    refreshModels,
+    deleteKey,
+    startLogin,
+    completeLogin,
+    cancelLogin,
+    check,
+    activate,
+    activeConfig,
+    acquire,
+    close: () => login.close(),
+    fallback: fallbackProvider,
+  };
 }

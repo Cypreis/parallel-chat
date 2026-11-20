@@ -8,8 +8,9 @@ const str = (description) => ({ type: "string", description });
 
 const SUMMARY =
   "An index line, not shown to the reader: one sentence stating what the card concludes, so other parts of the conversation can recall the card without its full text.";
-const BODY = "The card itself, in Markdown. Match its length to what was asked.";
-const TITLE = "Two to five words naming the topic, like a heading.";
+const BODY =
+  "The card itself, in Markdown (math in LaTeX between $ or $$). The title is not printed on the card, so open with the substance, not a heading. Its length fits this card's own content: cards in one answer can differ a lot in length.";
+const TITLE = "Two to five words naming the topic. Not printed on the card; it labels the card in lists and links.";
 
 // Property order puts the title first so a card can open early. Nothing
 // relies on the model keeping that order.
@@ -43,7 +44,7 @@ export const PLAN_CARD = {
     properties: {
       key: str("Your short name for this card within this answer, such as c1. link_cards uses it to refer to the card."),
       title: str(TITLE),
-      intent: str("One or two sentences telling the writer what this card must cover."),
+      intent: str("One or two sentences telling the writer what this card must cover, what form suits it (a couple of sentences, a list, a table, a formula, code) and roughly how long it should be. Cards may differ in length."),
     },
     required: ["key", "title", "intent"],
     additionalProperties: false,

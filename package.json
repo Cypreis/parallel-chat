@@ -4,7 +4,15 @@
   "private": true,
   "description": "A local chat app that answers one question as side-by-side cards, each with its own follow-up thread.",
   "license": "MIT",
-  "keywords": ["chat", "llm", "anthropic", "claude", "deepseek", "qwen", "cards"],
+  "keywords": [
+    "chat",
+    "llm",
+    "anthropic",
+    "claude",
+    "deepseek",
+    "qwen",
+    "cards"
+  ],
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
@@ -15,5 +23,8 @@
   },
   "optionalDependencies": {
     "@anthropic-ai/sdk": "^1.8.0"
+  },
+  "dependencies": {
+    "katex": "0.19.1"
   }
 }

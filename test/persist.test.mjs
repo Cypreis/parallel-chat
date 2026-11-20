@@ -235,12 +235,12 @@ describe("persistence", () => {
     const r = await post(a, "/api/config", { mode: "single", maxCards: 3, provider: "deepseek", model: "deepseek-flash" });
     assert.equal(r.status, 200);
     const configFile = path.join(dir, "config.json");
-    assert.deepEqual(JSON.parse(readFileSync(configFile, "utf8")), { provider: "deepseek", model: "deepseek-flash", mode: "single", maxCards: 3, length: "auto" });
+    assert.deepEqual(JSON.parse(readFileSync(configFile, "utf8")), { provider: "deepseek", model: "deepseek-flash", mode: "single", maxCards: 3, length: "auto", thinking: "auto" });
     await a.close();
 
     const b = await start(dir, { registry: withKey() });
     try {
-      assert.deepEqual(b.engine.getConfig(), { provider: "deepseek", model: "deepseek-flash", mode: "single", maxCards: 3, length: "auto" });
+      assert.deepEqual(b.engine.getConfig(), { provider: "deepseek", model: "deepseek-flash", mode: "single", maxCards: 3, length: "auto", thinking: "auto" });
     } finally {
       await b.close();
     }
@@ -248,7 +248,7 @@ describe("persistence", () => {
     const logger = captureLogger();
     const c = await start(dir, { logger }); // no key now
     try {
-      assert.deepEqual(c.engine.getConfig(), { provider: null, model: null, mode: "single", maxCards: 3, length: "auto" });
+      assert.deepEqual(c.engine.getConfig(), { provider: null, model: null, mode: "single", maxCards: 3, length: "auto", thinking: "auto" });
       assert.ok(logger.lines.some((l) => /saved provider deepseek has no key now; add one in Settings/.test(l)));
       assert.equal(JSON.parse(readFileSync(configFile, "utf8")).provider, null, "no provider is written back");
     } finally {

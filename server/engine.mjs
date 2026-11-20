@@ -33,6 +33,10 @@ import { createFieldStreamer } from "./fields.mjs";
 import { CREATE_CARD, LINK_CARDS, PLAN_CARD, RELS, WRITE_BRANCH_CARD, WRITE_CARD, validateInput } from "./tools.mjs";
 
 export { RELS, LENGTHS };
+// How hard the model thinks, where the provider lets us say so (Anthropic:
+// output_config.effort; ChatGPT: reasoning.effort). "auto" keeps the
+// provider's own default. Other providers ignore it.
+export const THINKING = ["auto", "low", "medium", "high", "max"];
 export const SHAPES = ["single", "parallel", "comparison", "steps"];
 export const MODES = ["single", "fanout"];
 export const MAX_CARDS = 6; // highest allowed maxCards
@@ -135,12 +139,13 @@ function parseInput(call, tool) {
 // provider: a fixed provider (tests); registry: the runtime-switchable one
 // (server/providers/registry.mjs). With a registry, each generation takes the
 // provider active when it starts and keeps it for every round.
-export function createEngine({ log, provider, registry = null, mode = "fanout", maxCards = DEFAULT_MAX_CARDS, length = "auto", logger = console }) {
+export function createEngine({ log, provider, registry = null, mode = "fanout", maxCards = DEFAULT_MAX_CARDS, length = "auto", thinking = "auto", logger = console }) {
   const acquire = registry ? () => registry.acquire() : () => provider;
   const config = {
     mode: MODES.includes(mode) ? mode : "fanout",
     maxCards: Number.isInteger(maxCards) && maxCards >= 1 && maxCards <= MAX_CARDS ? maxCards : DEFAULT_MAX_CARDS,
     length: LENGTHS.includes(length) ? length : "auto",
+    thinking: THINKING.includes(thinking) ? thinking : "auto",
   };
   const counters = { n: 0, e: 0, d: 0, g: 0, f: 0 };
   // A restored log: new ids continue after every id it holds (redacted events keep theirs in ref).
@@ -313,6 +318,7 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
           cacheSystem: !!ctx.cacheSystem,
           messages: [...messages],
           tools,
+          thinking: config.thinking,
           signal: job.signal,
           meta: { ...meta, round },
         });
@@ -1277,7 +1283,7 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
 
   function getConfig() {
     const active = registry ? registry.activeConfig() : { provider: provider.name, model: provider.model };
-    return { provider: active.provider, model: active.model, mode: config.mode, maxCards: config.maxCards, length: config.length };
+    return { provider: active.provider, model: active.model, mode: config.mode, maxCards: config.maxCards, length: config.length, thinking: config.thinking };
   }
 
   // Everything is validated before anything is applied.
@@ -1287,8 +1293,10 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
     const hasProvider = body?.provider !== undefined;
     const hasModel = body?.model !== undefined;
     const hasLength = body?.length !== undefined;
-    if (!hasMode && !hasMax && !hasProvider && !hasModel && !hasLength) throw new HttpError(400, "send mode, maxCards, length, provider and/or model");
+    const hasThinking = body?.thinking !== undefined;
+    if (!hasMode && !hasMax && !hasProvider && !hasModel && !hasLength && !hasThinking) throw new HttpError(400, "send mode, maxCards, length, thinking, provider and/or model");
     if (hasLength && !LENGTHS.includes(body.length)) throw new HttpError(400, `length must be one of: ${LENGTHS.join(", ")}`);
+    if (hasThinking && !THINKING.includes(body.thinking)) throw new HttpError(400, `thinking must be one of: ${THINKING.join(", ")}`);
     if (hasMode && !MODES.includes(body.mode)) throw new HttpError(400, `mode must be one of: ${MODES.join(", ")}`);
     if (hasMax && !(Number.isInteger(body.maxCards) && body.maxCards >= 1 && body.maxCards <= MAX_CARDS)) {
       throw new HttpError(400, `maxCards must be an integer from 1 to ${MAX_CARDS}`);
@@ -1301,6 +1309,7 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
     if (hasMode) config.mode = body.mode;
     if (hasMax) config.maxCards = body.maxCards;
     if (hasLength) config.length = body.length;
+    if (hasThinking) config.thinking = body.thinking;
     if (next) registry.activate(next);
     return getConfig();
   }

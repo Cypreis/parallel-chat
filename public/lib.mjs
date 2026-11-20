@@ -18,15 +18,63 @@ function emphasis(s) {
   return s;
 }
 
+// ---------- math ----------
+// LaTeX through KaTeX when the page has loaded it (globalThis.katex), else the
+// source in a styled span. Rendered HTML is cached: a streaming card re-renders
+// the same formulas many times.
+
+const texCache = new Map();
+export function renderTex(src, display) {
+  const tex = String(src).trim();
+  if (!tex) return '';
+  const key = (display ? 'D' : 'I') + tex;
+  const hit = texCache.get(key);
+  if (hit) return hit;
+  const k = globalThis.katex;
+  let html = null;
+  if (k && typeof k.renderToString === 'function') {
+    try {
+      html = k.renderToString(tex, { displayMode: display, throwOnError: false, output: 'htmlAndMathml', strict: 'ignore', trust: false });
+    } catch {
+      html = null;
+    }
+  }
+  if (html === null) html = '<code class="math-src">' + escapeHtml(tex) + '</code>';
+  html = display ? '<span class="math-display">' + html + '</span>' : '<span class="math-inline">' + html + '</span>';
+  if (k) {
+    if (texCache.size > 600) texCache.delete(texCache.keys().next().value);
+    texCache.set(key, html);
+  }
+  return html;
+}
+
+// Math spans in raw (unescaped) text, replaced by placeholders from put().
+// $$…$$ and \[…\] are display; \(…\) and $…$ inline. A single $ counts only
+// when it hugs its content ($x$, not "$5 and $10") and the closing one is not
+// followed by a digit, so prices stay text. \$ is a literal dollar sign.
+function mathSpans(s, put) {
+  s = s.replace(/\\\$/g, () => put('$'));
+  s = s.replace(/\$\$([^$]+?)\$\$/g, (_, t) => put(renderTex(t, true)));
+  s = s.replace(/\\\[([\s\S]+?)\\\]/g, (_, t) => put(renderTex(t, true)));
+  s = s.replace(/\\\(([\s\S]+?)\\\)/g, (_, t) => put(renderTex(t, false)));
+  s = s.replace(/\$(?![\s$])([^$\n]*?[^\s\\$])\$(?!\d)|\$([^\s$\\])\$(?!\d)/g, (_, a, b) => put(renderTex(a ?? b, false)));
+  // A display formula still being written: its source, quietly, not as stray text.
+  s = s.replace(/(\$\$|\\\[)([^$]*)$/, (_, d, t) => put('<code class="math-src pending">' + escapeHtml(d + t) + '</code>'));
+  return s;
+}
+
 function inline(raw) {
   const stash = [];
   const put = (html) => {
     stash.push(html);
     return '\u0001' + (stash.length - 1) + '\u0002';
   };
-  // Escape first: everything after this point only ever adds tags we write ourselves.
-  let s = escapeHtml(String(raw).replace(/[\u0001\u0002]/g, ''));
-  s = s.replace(/`([^`\n]+)`/g, (_, c) => put('<code>' + c + '</code>'));
+  // Code and math come out before escaping (their content is escaped or
+  // rendered on its own); after that, everything only adds tags we write ourselves.
+  let s = String(raw).replace(/[\u0001\u0002]/g, '');
+  s = s.replace(/`([^`\n]+)`/g, (_, c) => put('<code>' + escapeHtml(c) + '</code>'));
+  s = mathSpans(s, put);
+  s = escapeHtml(s);
   s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/gi, (_, label, url) =>
     put('<a href="' + url + '" target="_blank" rel="noopener noreferrer">' + emphasis(label) + '</a>'));
   s = emphasis(s);
@@ -44,6 +92,13 @@ export function renderMarkdown(src) {
   } catch (e) {
     return '<p>' + escapeHtml(String(src ?? '')) + '</p>';
   }
+}
+
+// A display formula as its own block. While it is still streaming (no closing
+// delimiter yet) the source shows quietly instead of half-rendered.
+function mathBlock(tex, closed) {
+  if (!closed) return '<div class="math-block pending"><code class="math-src">' + escapeHtml(String(tex).trim()) + '</code></div>';
+  return '<div class="math-block">' + renderTex(tex, true) + '</div>';
 }
 
 const isTableSep = (l) => /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(l) && l.includes('-') && l.includes('|');
@@ -91,7 +146,7 @@ function renderBlocks(src) {
     const line = lines[i];
     let m;
 
-    if ((m = /^\s{0,3}(`{3,}|~{3,})\s*[\w+-]*\s*$/.exec(line))) {
+    if ((m = /^\s{0,3}(`{3,}|~{3,})\s*([\w+-]*)\s*$/.exec(line))) {
       flushAll();
       const fence = m[1];
       const closeRe = new RegExp('^\\s{0,3}' + fence[0] + '{' + fence.length + ',}\\s*$');
@@ -101,8 +156,36 @@ function renderBlocks(src) {
         if (closeRe.test(lines[i])) { closed = true; break; }
         code.push(lines[i]);
       }
-      out.push('<div class="code-wrap"><pre class="code' + (closed ? '' : ' open') + '"><code>' + escapeHtml(code.join('\n')) + '</code></pre>' + COPY_BTN + '</div>');
+      if (/^(math|latex|tex|katex)$/i.test(m[2])) out.push(mathBlock(code.join('\n'), closed));
+      else out.push('<div class="code-wrap"><pre class="code' + (closed ? '' : ' open') + '"><code>' + escapeHtml(code.join('\n')) + '</code></pre>' + COPY_BTN + '</div>');
       continue;
+    }
+
+    // Display math on lines of its own: $$ … $$ or \[ … \], on one line or several.
+    if ((m = /^\s{0,3}(\$\$|\\\[)(.*)$/.exec(line))) {
+      const close = m[1] === '$$' ? '$$' : '\\]';
+      const rest = m[2];
+      const at = rest.indexOf(close);
+      if (at >= 0 && !rest.slice(at + close.length).trim()) {
+        flushAll();
+        out.push(mathBlock(rest.slice(0, at), true));
+        continue;
+      }
+      if (at < 0) {
+        flushAll();
+        const tex = [rest];
+        let closed = false;
+        let after = '';
+        for (i++; i < lines.length; i++) {
+          const j = lines[i].indexOf(close);
+          if (j >= 0) { tex.push(lines[i].slice(0, j)); after = lines[i].slice(j + close.length).trim(); closed = true; break; }
+          tex.push(lines[i]);
+        }
+        out.push(mathBlock(tex.join('\n'), closed));
+        if (after) para.push(after);
+        continue;
+      }
+      // "$$x$$ and more text" on one line: the paragraph's inline pass handles it
     }
 
     if (/^\s*$/.test(line)) {

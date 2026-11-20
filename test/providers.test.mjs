@@ -437,18 +437,22 @@ describe("provider registry and /api/providers", () => {
     noKeys(JSON.stringify(app.log.since(0)), "the event log");
   });
 
-  test("the initial listing: three providers, no keys, none active", async () => {
+  test("the initial listing: five providers, no keys, none active", async () => {
     const r = await api("GET", "/api/providers");
     assert.equal(r.status, 200);
     assert.deepEqual(r.body.active, { provider: null, model: null });
     assert.deepEqual(
-      r.body.providers.map((p) => [p.id, p.needsKey, p.hasKey]),
+      r.body.providers.map((p) => [p.id, p.auth, p.needsKey, p.hasKey]),
       [
-        ["anthropic", true, false],
-        ["deepseek", true, false],
-        ["qwen", true, false],
+        ["anthropic", "key", true, false],
+        ["deepseek", "key", true, false],
+        ["qwen", "key", true, false],
+        ["opencode", "key", true, false],
+        ["chatgpt", "oauth", true, false],
       ],
     );
+    assert.equal((await api("POST", "/api/providers/chatgpt/key", { apiKey: "sk-not-used-here-1234" })).status, 400);
+    assert.equal((await api("POST", "/api/providers/deepseek/login", {})).status, 400);
     const qwen = r.body.providers[2];
     assert.deepEqual(
       qwen.regions.map((x) => x.id),
@@ -499,7 +503,7 @@ describe("provider registry and /api/providers", () => {
     assert.equal((await api("POST", "/api/config", { provider: "qwen", model: "qwen-plus" })).status, 400, "no key");
     assert.equal((await api("POST", "/api/config", { provider: "nope", model: "x" })).status, 400);
     const r = await api("POST", "/api/config", { provider: "deepseek", model: "deepseek-flash" });
-    assert.deepEqual(r.body, { provider: "deepseek", model: "deepseek-flash", mode: "fanout", maxCards: 4, length: "auto" });
+    assert.deepEqual(r.body, { provider: "deepseek", model: "deepseek-flash", mode: "fanout", maxCards: 4, length: "auto", thinking: "auto" });
     assert.deepEqual((await api("GET", "/api/config")).body, r.body);
     assert.equal((await api("POST", "/api/config", { model: "my-typed-model" })).body.model, "my-typed-model");
     assert.equal((await api("POST", "/api/config", { model: "deepseek-flash", mode: "single" })).body.mode, "single");

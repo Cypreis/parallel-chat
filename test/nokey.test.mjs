@@ -15,7 +15,7 @@ test("without a key: no active provider, and a question fails with the add-a-key
     assert.equal(cfg.provider, null);
     assert.equal(cfg.model, null);
     const listed = await fetch(`${app.url}/api/providers`).then((r) => r.json());
-    assert.deepEqual(listed.providers.map((p) => p.id), ["anthropic", "deepseek", "qwen"]);
+    assert.deepEqual(listed.providers.map((p) => p.id), ["anthropic", "deepseek", "qwen", "opencode", "chatgpt"]);
 
     const res = await fetch(`${app.url}/api/ask`, {
       method: "POST",

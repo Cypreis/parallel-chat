@@ -128,8 +128,8 @@ export function createStore({ dir, logger = console }) {
       schedule();
     },
     saveConfig(config) {
-      const { provider, model, mode, maxCards, length } = config;
-      atomicWrite(configFile, JSON.stringify({ provider, model, mode, maxCards, length }, null, 2) + "\n");
+      const { provider, model, mode, maxCards, length, thinking } = config;
+      atomicWrite(configFile, JSON.stringify({ provider, model, mode, maxCards, length, thinking }, null, 2) + "\n");
     },
     // Write everything queued so far.
     async flush() {

@@ -12,7 +12,7 @@ Object.defineProperty(HTMLElement.prototype, 'title', {
 });
 for (const el of document.querySelectorAll('[title]')) { el.dataset.tip = el.getAttribute('title'); el.removeAttribute('title'); }
 installTooltips();
-import { plainQuote, renderMarkdown, firstSentence, truncate, edgePhrase, formatChars, STATUS_LABEL, EDGE_VERB } from '/lib.mjs';
+import { plainQuote, renderMarkdown, firstSentence, truncate, formatChars, STATUS_LABEL, EDGE_VERB } from '/lib.mjs';
 import { readFileAsDoc, formatBytes, downloadText, safeFilename } from '/files.mjs';
 
 /* ------------------------------------------------------------------ state */
@@ -145,7 +145,7 @@ const els = {
   decSrc: $('dec-src'), decFormH: $('dec-form-h'), decAffects: $('dec-affects'), decAffList: $('dec-aff-list'), decAffAll: $('dec-aff-all'), decAffNone: $('dec-aff-none'),
   decSubmit: $('dec-submit'), decCancel: $('dec-cancel'),
   popAsk: $('pop-ask'), popPin: $('pop-pin'), popNote: $('pop-note'),
-  lenBtn: $('len-btn'), lenLabel: $('len-label'),
+  lenBtn: $('len-btn'), lenLabel: $('len-label'), thinkBtn: $('think-btn'), thinkLabel: $('think-label'),
 };
 
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
@@ -555,11 +555,29 @@ function cardWidthPx(cardId, boardInner, curId) {
   return Math.round(Math.max(260, (boardInner - (n - 1) * gap) / n));
 }
 
+// Fit: how much of a row a card claims, from how much it holds. A two-line
+// card stays narrow, a table or a long walkthrough gets more room. Rounded so
+// a card that is still streaming does not resize on every token.
+function fitGrow(c) {
+  const body = c.body || '';
+  let len = body.length + threadOf(state, c.id).reduce((a, m) => a + (m.body || '').length * 0.5, 0);
+  if (/^\s*\|.*\|\s*$/m.test(body)) len *= 1.5; // tables want width
+  if (/```|\$\$/.test(body)) len *= 1.2; // code and display math too
+  const g = Math.sqrt(Math.max(len, 120) / 700);
+  return Math.round(Math.min(2.4, Math.max(0.6, g)) * 5) / 5;
+}
+
+// A full-width zero-height item that ends a row in Fit.
+function fitBreak(cv, n) {
+  cv.breaks ||= [];
+  return (cv.breaks[n] ||= h('div', { class: 'fit-break', 'aria-hidden': 'true' }));
+}
+
 // Clear every inline layout property a view set, so another view starts clean.
 function resetBox(v) {
   if (v.sq) { v.sq = false; v.el.classList.remove('sq', 'reply-open'); v.linksSig = ''; }
   v.el.style.cssText = '';
-  v.w = undefined; v.fl = null;
+  v.w = undefined; v.fl = null; v.grow = undefined;
   v.flAnim?.cancel(); v.flAnim = null;
 }
 
@@ -618,6 +636,9 @@ function renderChats(ts) {
         if (isFocusOn()) cv.row.style.setProperty('--focus-pad', focusLayout().pad + 'px');
         const w = cardWidthPx(c.id, inner, cur);
         if (v.w !== w) { v.w = w; v.el.style.width = w + 'px'; }
+      } else if (view === 'fit') {
+        const g = fitGrow(c);
+        if (v.grow !== g) { v.grow = g; v.el.style.setProperty('--grow', g); }
       }
       updateCard(v, c, cur, flow);
     }
@@ -636,16 +657,19 @@ function renderChats(ts) {
       reconcile(cv.row, [cv.sizer, ...items.map((it) => it.v.el)]);
       if (active) layoutFlow(cv, items, wasShown);
     } else {
-      reconcile(cv.row, cardEls);
       if (view === 'fit') {
-        // never narrower than 280px; one row, else two equal rows, else scroll sideways
+        // Cards share each row by how much they hold (--grow), each as tall as
+        // its text up to the row. One row while every card gets 260px, else
+        // two rows split in the middle, else more rows and the board scrolls.
         const n = Math.max(1, cards.length);
-        const cap = Math.max(1, Math.floor((inner + 12) / 292));
-        const rows = n <= cap ? 1 : n <= 2 * cap ? 2 : 1;
-        const cols = rows === 2 ? Math.ceil(n / 2) : n;
-        cv.row.style.setProperty('--cols', cols);
-        cv.row.style.setProperty('--rows', rows);
-      }
+        const cap = Math.max(1, Math.floor((inner + 8) / 268));
+        const rows = Math.ceil(n / cap) <= 1 ? 1 : n <= 2 * cap ? 2 : Math.ceil(n / cap);
+        const perRow = Math.ceil(n / rows);
+        const els2 = [];
+        cardEls.forEach((el, i) => { if (i && i % perRow === 0) els2.push(fitBreak(cv, i / perRow)); els2.push(el); });
+        reconcile(cv.row, els2);
+        cv.row.style.setProperty('--rows', Math.min(rows, 2));
+      } else reconcile(cv.row, cardEls);
       if (active) flipRow(cv, cards, view, wasShown);
       let morph = cv.morphFrom;
       for (const c of cards) { const v = cardViews.get(c.id); if (v.fresh && active) { playFresh(v, null, false, morph); if (morph) { morph = null; cv.morphFrom = null; } } }
@@ -1302,9 +1326,8 @@ function createCard(id) {
   v.error = h('div', { class: 'card-error', hidden: true, role: 'alert' }, icon('alert'), v.errMsg, h('button', { class: 'btn small bordered', type: 'button', text: 'Try again', onclick: () => refreshCard(id) }));
   v.skel = h('div', { class: 'skeleton', hidden: true, 'aria-hidden': 'true' }, h('i'), h('i'), h('i'));
   v.body = h('div', { class: 'md body', 'data-askable': '' });
-  v.links = h('div', { class: 'links' });
   v.thread = h('div', { class: 'thread' });
-  v.content = h('div', { class: 'card-content' }, v.ctx, v.error, v.skel, v.body, v.links, v.thread);
+  v.content = h('div', { class: 'card-content' }, v.ctx, v.error, v.skel, v.body, v.thread);
   v.scroller = h('div', { class: 'card-scroll' }, v.content);
 
   v.quoteText = h('span', { class: 'quote-text' });
@@ -1339,8 +1362,9 @@ function createCard(id) {
 function updateCard(v, c, curId, flow) {
   const st = c.status;
   const o = c.origin;
-  if (!c.title && o) { setText(v.title, ''); setClass(v.title, 'skeleton-title', true); }
-  else { setClass(v.title, 'skeleton-title', false); setText(v.title, c.title || 'Untitled card'); }
+  // The title is not shown on the card (it labels the card elsewhere); screen readers still get it.
+  setText(v.title, c.title || '');
+  setAttr(v.el, 'aria-label', c.title || 'Card');
   setHidden(v.origin, !o);
   setHidden(v.ask, !o);
   if (o) {
@@ -1356,7 +1380,8 @@ function updateCard(v, c, curId, flow) {
   const sendTip = flow ? 'Enter: the model decides · Ctrl+Enter: new card · Alt+Enter: this card' : 'Send';
   if (v.send._tip !== sendTip) { v.send._tip = sendTip; v.send.title = sendTip; }
   if (v.input._ph !== ph) { v.input._ph = ph; v.input.placeholder = ph; v.input.setAttribute('aria-label', ph); }
-  const label = { streaming: 'Writing', stale: 'Out of date', error: 'Error', cancelled: 'Stopped' }[st];
+  // Writing shows as the card's sheen, out of date and error as their own boxes: only Stopped needs a pill.
+  const label = { cancelled: 'Stopped' }[st];
   setHidden(v.status, !label);
   if (label) setText(v.status, label);
   if (v.status._st !== st) { v.status._st = st; v.status.className = 'status st-' + st; }
@@ -1396,8 +1421,6 @@ function updateCard(v, c, curId, flow) {
 
   setMarkdown(v.body, c.body || '', st === 'streaming');
 
-  updateLinks(v, c);
-
   const msgs = threadOf(state, c.id);
   const mEls = [];
   for (const m of msgs) {
@@ -1416,73 +1439,6 @@ function updateCard(v, c, curId, flow) {
     }
   }
   updateQuote(v);
-}
-
-function updateLinks(v, c) {
-  const edges = edgesOf(state, c.id);
-  const items = edges.map((e) => {
-    const p = edgePhrase(e, c.id);
-    const other = state.nodes[p.otherId];
-    const cross = !!other && nodeChat(other.id) !== nodeChat(c.id);
-    const label = cross
-      ? `${p.verb} Chat ${chatNo(nodeChat(other.id))} · ${other.title || 'Untitled card'}`
-      : `${p.verb} ${titleOf(p.otherId)}`;
-    return { key: e.id, edgeId: e.id, otherId: p.otherId, cross, label };
-  });
-  const collapse = !!v.sq && items.length > 1;
-  const sig = (collapse ? 'c|' : '') + items.map((i) => i.key + ':' + i.label).join('|');
-  if (v.linksSig === sig) return;
-  v.linksSig = sig;
-  const mk = (i) => {
-    const b = h('button', { class: 'link-chip' + (i.cross ? ' cross' : ''), type: 'button', title: i.cross ? 'Peek at the linked card in the other chat' : 'Go to that card' }, icon('link'), h('span', { class: 'lc-t', text: i.label }));
-    if (!i.cross) {
-      b.addEventListener('mouseenter', () => setLinked(i.otherId));
-      b.addEventListener('mouseleave', () => setLinked(null));
-      b.addEventListener('focus', () => setLinked(i.otherId));
-      b.addEventListener('blur', () => setLinked(null));
-      b.addEventListener('click', () => revealCard(i.otherId));
-    } else {
-      b.addEventListener('click', () => openDrawer({ kind: 'peek', edgeId: i.edgeId, cardId: i.otherId }));
-    }
-    return b;
-  };
-  if (collapse) {
-    const more = h('button', { class: 'link-chip', type: 'button', title: 'Show the links', 'aria-haspopup': 'true' }, icon('link'), h('span', { class: 'lc-t', text: items.length + ' links' }));
-    more.addEventListener('click', () => openLinksPop(more, items.map(mk)));
-    v.links.replaceChildren(more);
-  } else v.links.replaceChildren(...items.map(mk));
-  setHidden(v.links, items.length === 0);
-}
-
-// Short (square) cards: the links open in a small popover anchored to the chip.
-let linksPop = null;
-function closeLinksPop() {
-  if (!linksPop) return;
-  linksPop.remove();
-  linksPop = null;
-}
-function openLinksPop(anchor, chips) {
-  const was = linksPop && linksPop._anchor === anchor;
-  closeLinksPop();
-  if (was) return;
-  const pop = h('div', { class: 'popover links-pop', role: 'dialog', 'aria-label': 'Links' }, chips);
-  pop._anchor = anchor;
-  pop.addEventListener('click', (e) => { if (e.target.closest('.link-chip')) closeLinksPop(); });
-  document.body.append(pop);
-  const r = anchor.getBoundingClientRect();
-  pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - pop.offsetWidth - 8)) + 'px';
-  const below = r.bottom + 6 + pop.offsetHeight <= window.innerHeight;
-  pop.style.top = (below ? r.bottom + 6 : Math.max(8, r.top - pop.offsetHeight - 6)) + 'px';
-  linksPop = pop;
-}
-document.addEventListener('mousedown', (e) => { if (linksPop && !e.target.closest('.links-pop') && !linksPop._anchor.contains(e.target)) closeLinksPop(); });
-window.addEventListener('scroll', closeLinksPop, true);
-
-function setLinked(id) {
-  if (ui.linkedId === id) return;
-  cardViews.get(ui.linkedId)?.el.classList.remove('linked');
-  ui.linkedId = id;
-  cardViews.get(id)?.el.classList.add('linked');
 }
 
 function updateQuote(v) {
@@ -2676,7 +2632,7 @@ function renderBar() {
 
 /* ---- Model section (providers, keys, models) */
 
-const PROV_ORDER = ['anthropic', 'deepseek', 'qwen'];
+const PROV_ORDER = ['anthropic', 'chatgpt', 'opencode', 'deepseek', 'qwen'];
 const provLabel = (p) => p.label || p.id;
 
 // Provider calls always send JSON and never notify: errors show inline in the dialog.
@@ -2713,6 +2669,105 @@ async function loadProviders() {
   }
   renderSettings();
   renderModelUi();
+  watchSignIn();
+}
+
+/* ChatGPT sign-in: the server waits for the redirect; the page polls until it lands. */
+
+let signInTimer = null;
+const signInPending = () => ui.prov.list.some((p) => p.auth === 'oauth' && p.login?.pending);
+const signInShape = (p) => JSON.stringify([p.hasKey, p.login, p.account, p.models?.length ?? null, p.modelsError]);
+
+function watchSignIn() {
+  if (!signInPending()) { clearInterval(signInTimer); signInTimer = null; return; }
+  if (signInTimer) return;
+  signInTimer = setInterval(async () => {
+    const r = await pApi('GET', '/api/providers');
+    if (!r.ok || !Array.isArray(r.data.providers)) return;
+    let changed = false;
+    for (const p of r.data.providers) {
+      const old = provById(p.id);
+      if (p.auth !== 'oauth' || (old && signInShape(old) === signInShape(p))) continue;
+      applyProvider(p); changed = true;
+      if (p.hasKey && !old?.hasKey) { const st = provUi(p.id); st.autoTried = !!p.models || !!p.modelsError; st.error = ''; }
+    }
+    if (changed) renderModelUi();
+    if (!signInPending()) { clearInterval(signInTimer); signInTimer = null; }
+  }, 1500);
+}
+
+async function startSignIn(p, { remember }) {
+  const st = provUi(p.id);
+  // Open the tab inside the click, so it is not blocked; point it once the server answers.
+  let tab = null;
+  try { tab = window.open('', '_blank'); } catch { tab = null; }
+  st.busy = true; st.error = '';
+  renderModelUi({ keepFocus: false });
+  const r = await pApi('POST', `/api/providers/${encodeURIComponent(p.id)}/login`, { remember: !!remember });
+  st.busy = false;
+  if (r.ok && r.data.provider) {
+    applyProvider(r.data.provider);
+    const url = r.data.provider.login?.url;
+    if (tab && url) { try { tab.opener = null; tab.location.href = url; } catch { /* the link below still works */ } }
+    else if (tab) tab.close();
+    st.tabBlocked = !tab;
+  } else {
+    tab?.close();
+    st.error = r.error;
+  }
+  renderModelUi();
+  watchSignIn();
+}
+
+async function finishSignIn(p, url) {
+  const st = provUi(p.id);
+  st.busy = true; st.error = '';
+  renderModelUi({ keepFocus: false });
+  const r = await pApi('POST', `/api/providers/${encodeURIComponent(p.id)}/login/complete`, { url });
+  st.busy = false;
+  if (r.ok && r.data.provider) { applyProvider(r.data.provider); st.paste = ''; st.autoTried = false; }
+  else st.error = r.error;
+  renderModelUi();
+  watchSignIn();
+}
+
+async function cancelSignIn(p) {
+  const st = provUi(p.id);
+  const r = await pApi('DELETE', `/api/providers/${encodeURIComponent(p.id)}/login`);
+  if (r.ok && r.data.provider) applyProvider(r.data.provider); else st.error = r.error;
+  st.paste = '';
+  renderModelUi();
+  watchSignIn();
+}
+
+function signInPanel(p, st, panel, err) {
+  const login = p.login || {};
+  if (login.pending) {
+    panel.append(h('p', { class: 'set-note', text: 'Finish signing in on the OpenAI page that opened in a new tab. This panel updates by itself.' }));
+    const links = h('div', { class: 'set-actions' },
+      login.url ? h('a', { class: 'btn primary', href: login.url, target: '_blank', rel: 'noopener noreferrer', 'data-fk': 'signin-open', text: st.tabBlocked ? 'Open the sign-in page' : 'Open it again' }) : null,
+      h('button', { class: 'btn', type: 'button', 'data-fk': 'signin-cancel', text: 'Cancel', disabled: st.busy, onclick: () => cancelSignIn(p) }));
+    panel.append(links);
+    if (!login.callback) panel.append(h('p', { class: 'field-err plain', text: 'Port 1455 is in use (is Codex CLI signing in?), so the sign-in cannot come back by itself. Paste the address below when the tab ends on a page that does not load.' }));
+    const pasteId = 'paste-' + p.id;
+    const paste = h('input', { type: 'text', id: pasteId, 'data-fk': 'paste', value: st.paste || '', placeholder: 'http://localhost:1455/auth/callback?code=…', autocomplete: 'off', spellcheck: 'false', disabled: st.busy });
+    paste.addEventListener('input', () => { st.paste = paste.value; });
+    const go = () => { const v = paste.value.trim(); if (!v) { st.error = 'Paste the address from the browser bar first.'; renderModelUi(); return; } finishSignIn(p, v); };
+    paste.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
+    panel.append(h('label', { class: 'field-label', for: pasteId, text: 'Stuck on a page that won’t load? Paste its address' }), paste,
+      h('div', { class: 'set-actions' }, h('button', { class: 'btn', type: 'button', 'data-fk': 'paste-go', text: st.busy ? 'Checking' : 'Finish sign-in', disabled: st.busy, onclick: go })), err);
+    return panel;
+  }
+  const remember = h('input', { type: 'checkbox', id: 'rem-' + p.id, 'data-fk': 'remember', checked: st.remember, disabled: st.busy });
+  remember.addEventListener('change', () => { st.remember = remember.checked; });
+  panel.append(
+    h('p', { class: 'set-note', text: 'Use the models in your ChatGPT plan (Plus, Pro, Business…) with no API key. Requests count toward your plan’s limits, the same way Codex does.' }),
+    h('label', { class: 'check-row', for: 'rem-' + p.id }, remember, h('span', { text: 'Stay signed in on this computer' })),
+    h('p', { class: 'muted set-note small', text: 'Saves the sign-in to .keys.json in the app folder (git-ignored). Otherwise you are signed out when the server stops.' }),
+    h('div', { class: 'set-actions' }, h('button', { class: 'btn primary', type: 'button', 'data-fk': 'signin', text: st.busy ? 'Starting' : 'Sign in with ChatGPT', disabled: st.busy, onclick: () => startSignIn(p, { remember: remember.checked }) })));
+  if (login.error && !st.error) panel.append(h('p', { class: 'field-err', role: 'alert', text: login.error }));
+  panel.append(err);
+  return panel;
 }
 
 function ctxLabel(n) {
@@ -2831,7 +2886,7 @@ function renderModelUi({ keepFocus = true } = {}) {
     },
       h('span', { class: 'pr-main' },
         h('span', { class: 'pr-name', text: provLabel(p) }),
-        h('span', { class: 'pr-sub muted', text: p.hasKey && p.keyHint ? `key ${p.keyHint}` : '' })),
+        h('span', { class: 'pr-sub muted', text: p.auth === 'oauth' ? (p.hasKey ? (p.account?.email || 'signed in') : p.login?.pending ? 'signing in…' : '') : p.hasKey && p.keyHint ? `key ${p.keyHint}` : '' })),
       isActive ? h('span', { class: 'active-mark', text: 'active' }) : null);
   }));
 
@@ -2847,7 +2902,9 @@ function providerPanel(p) {
   const panel = h('div', { class: 'prov-panel' });
   const err = h('p', { class: 'field-err', role: 'alert', text: st.error || '', hidden: !st.error });
   const isActive = ui.prov.active?.provider === p.id;
+  const oauth = p.auth === 'oauth';
 
+  if (!p.hasKey && oauth) return signInPanel(p, st, panel, err);
   if (!p.hasKey) {
     // key entry: the value lives only in this input until Connect is pressed
     const keyId = 'key-' + p.id;
@@ -2885,12 +2942,13 @@ function providerPanel(p) {
 
   // a key is stored: show the hint and the model picker
   const src = { env: 'from an environment variable', file: 'remembered', page: 'this session' }[p.keySource] || '';
-  const hint = ['Key ending ' + String(p.keyHint || '').replace(/^…/, ''), src].filter(Boolean).join(' · ');
+  const who = oauth ? ['Signed in' + (p.account?.email ? ' as ' + p.account.email : ''), p.account?.plan ? p.account.plan + ' plan' : ''].filter(Boolean).join(' · ') : 'Key ending ' + String(p.keyHint || '').replace(/^…/, '');
+  const hint = [who, src].filter(Boolean).join(' · ');
   const remove = st.confirmRemove
     ? h('span', { class: 'reset-wrap' },
-      h('button', { class: 'btn danger', type: 'button', 'data-fk': 'rm-yes', text: 'Confirm remove', onclick: () => removeKey(p) }),
+      h('button', { class: 'btn danger', type: 'button', 'data-fk': 'rm-yes', text: oauth ? 'Confirm sign out' : 'Confirm remove', onclick: () => removeKey(p) }),
       h('button', { class: 'btn', type: 'button', 'data-fk': 'rm-no', text: 'Cancel', onclick: () => { st.confirmRemove = false; renderModelUi(); } }))
-    : h('button', { class: 'btn', type: 'button', 'data-fk': 'rm', text: 'Remove key', disabled: st.busy, onclick: () => { st.confirmRemove = true; renderModelUi(); } });
+    : h('button', { class: 'btn', type: 'button', 'data-fk': 'rm', text: oauth ? 'Sign out' : 'Remove key', disabled: st.busy, onclick: () => { st.confirmRemove = true; renderModelUi(); } });
   panel.append(h('div', { class: 'set-row key-row' }, h('span', { class: 'muted', text: hint }), remove));
 
   if (p.models == null && !p.modelsError && !st.autoTried && !st.listBusy) { queueMicrotask(() => fetchModels(p)); }
@@ -2906,6 +2964,7 @@ function providerPanel(p) {
     const list = h('div', { class: 'model-list', role: 'radiogroup', 'aria-label': 'Models' });
     filter.addEventListener('input', () => { ui.prov.filter = filter.value; modelRows(p, st, list); });
     modelRows(p, st, list);
+    if (p.modelsError) panel.append(h('p', { class: 'muted set-note small', text: p.modelsError }));
     panel.append(filter, list, h('label', { class: 'field-label', for: 'other-' + p.id, text: 'Use another model id' }));
   } else if (p.modelsError) {
     panel.append(h('p', { class: 'field-err plain', text: p.modelsError }), h('label', { class: 'field-label', for: 'other-' + p.id, text: 'Model id' }));
@@ -2927,7 +2986,7 @@ function providerPanel(p) {
 function renderSettings() {
   const { provider, model, mode, maxCards } = ui.config;
   const modeLabel = mode === 'fanout' ? 'fan-out' : 'single';
-  setText(els.provider, provider ? [provider, model && model !== provider ? model : '', modeLabel].filter(Boolean).join(' \u00b7 ') : 'Add an API key');
+  setText(els.provider, provider ? [provider, model && model !== provider ? model : '', modeLabel].filter(Boolean).join(' \u00b7 ') : 'Connect a model');
   setText(els.providerLine, provider ? (model && model !== provider ? provider + ' \u00b7 ' + model : provider) : 'No model connected yet');
   setHidden(els.providerLine, ui.prov.status === 'ready');
   for (const b of els.settings.querySelectorAll('[data-mode]')) {
@@ -2945,6 +3004,16 @@ function renderSettings() {
   setClass(els.lenBtn, 'set', length !== 'auto');
   const lenTip = 'Answer length: ' + (LENGTH_LABEL[length] || 'Auto') + ' (L)';
   if (els.lenBtn.title !== lenTip) els.lenBtn.title = lenTip;
+  const thinking = ui.config.thinking || 'auto';
+  for (const b of els.settings.querySelectorAll('[data-thinking]')) {
+    const on = b.dataset.thinking === thinking;
+    setClass(b, 'on', on);
+    setAttr(b, 'aria-checked', String(on));
+  }
+  setText(els.thinkLabel, THINKING_LABEL[thinking] || 'Auto');
+  setClass(els.thinkBtn, 'set', thinking !== 'auto');
+  const thinkTip = 'Thinking level: ' + (THINKING_LABEL[thinking] || 'Auto') + ' (T)';
+  if (els.thinkBtn.title !== thinkTip) els.thinkBtn.title = thinkTip;
   for (const b of els.maxSeg.children) {
     const on = Number(b.dataset.max) === Number(maxCards);
     setClass(b, 'on', on);
@@ -3172,6 +3241,24 @@ for (const b of els.settings.querySelectorAll('[data-length]')) b.addEventListen
 els.lenBtn.addEventListener('click', () => openMenu(els.lenBtn, [
   { heading: 'Answer length' },
   ...LENGTHS.map((l) => ({ label: `${l.label} · ${l.note}`, checked: (ui.config.length || 'auto') === l.id, run: () => setLength(l.id) })),
+]));
+// thinking level: same pattern, a server setting used by Anthropic and ChatGPT
+const THINKING = [
+  { id: 'auto', label: 'Auto', note: 'The provider default' },
+  { id: 'low', label: 'Low', note: 'Fastest, least reasoning' },
+  { id: 'medium', label: 'Medium', note: 'Balanced' },
+  { id: 'high', label: 'High', note: 'Reasons longer on hard questions' },
+  { id: 'max', label: 'Max', note: 'As much as the model allows' },
+];
+const THINKING_LABEL = Object.fromEntries(THINKING.map((t) => [t.id, t.label]));
+async function setThinking(id) {
+  const c = await api('POST', '/api/config', { thinking: id });
+  if (c) { ui.config = { ...ui.config, ...c }; schedule(); toast('Thinking level: ' + THINKING_LABEL[id]); }
+}
+for (const b of els.settings.querySelectorAll('[data-thinking]')) b.addEventListener('click', () => setThinking(b.dataset.thinking));
+els.thinkBtn.addEventListener('click', () => openMenu(els.thinkBtn, [
+  { heading: 'Thinking level' },
+  ...THINKING.map((t) => ({ label: `${t.label} · ${t.note}`, checked: (ui.config.thinking || 'auto') === t.id, run: () => setThinking(t.id) })),
 ]));
 for (const b of els.settings.querySelectorAll('[data-mode]')) {
   b.addEventListener('click', async () => {
@@ -3594,6 +3681,8 @@ cmd({ id: 'decisions', title: 'Decisions: rules the model follows', group: 'View
 cmd({ id: 'files', title: 'Files the model reads in this chat', group: 'View', keys: ['f'], names: ['files', 'documents'], slash: 'files', when: inChatNow, run: () => openDrawer({ kind: 'files' }) });
 cmd({ id: 'notes', title: 'Notes on this chat (private)', group: 'View', keys: ['N'], names: ['notes'], slash: 'notes', when: inChatNow, run: () => openDrawer({ kind: 'notes' }) });
 cmd({ id: 'length', title: 'Answer length', group: 'Write', keys: ['L'], names: ['length', 'short', 'long'], slash: 'length', run: () => els.lenBtn.click() });
+cmd({ id: 'thinking', title: 'Thinking level', group: 'Write', keys: ['T'], names: ['thinking', 'effort', 'reasoning'], slash: 'thinking', run: () => els.thinkBtn.click() });
+for (const t of ['low', 'medium', 'high', 'max', 'auto']) cmd({ id: 'thinking.' + t, title: 'Thinking level: ' + t[0].toUpperCase() + t.slice(1), group: 'Write', keys: [], names: [t], hidden: true, run: () => setThinking(t) });
 for (const l of ['brief', 'medium', 'detailed', 'auto']) cmd({ id: 'length.' + l, title: 'Answer length: ' + l[0].toUpperCase() + l.slice(1), group: 'Write', keys: [], names: [l], hidden: true, run: () => setLength(l) });
 cmd({ id: 'attach',title: 'Attach files to the next question', group: 'Write', keys: ['A'], names: ['attach', 'upload'], slash: 'attach', run: () => { fileTarget = 'composer'; els.fileInput.click(); } });
 cmd({ id: 'card.note', title: 'Note on the current card', group: 'Cards', keys: ['m'], names: ['note'], when: () => !!curCard(), run: () => { const v = cardViews.get(curCard()); if (v) toggleNote(v); } });

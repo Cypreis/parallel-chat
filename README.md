@@ -29,8 +29,31 @@ follow-up thread, so you can dig into one part without losing the others.
 - **Your keys stay with you.** It runs on your machine and talks to the model
   provider you choose with your own API key.
 
-Providers: **Anthropic** (Claude), **DeepSeek** and **Qwen** (Alibaba Cloud
-Model Studio).
+Providers: **Anthropic** (Claude), **ChatGPT** (sign in with your ChatGPT
+plan, no API key), **OpenCode** (Zen), **DeepSeek** and **Qwen** (Alibaba
+Cloud Model Studio).
+
+### Sign in with ChatGPT
+
+Settings → ChatGPT → **Sign in with ChatGPT** opens OpenAI's sign-in page.
+When you finish, it sends you back to `http://localhost:1455/auth/callback`,
+and the app picks up the sign-in by itself. If that port is busy (Codex CLI
+signing in at the same time) or the page does not load, paste the address
+from the browser bar into the box Settings shows.
+
+This is the same sign-in and backend that Codex CLI uses
+(`chatgpt.com/backend-api/codex`). Requests count toward your plan's limits,
+and the sign-in is meant for your own personal use. It has only been tested
+against a local fake of OpenAI's servers, not a real account. Tokens are kept
+like keys: in memory, or in `.keys.json` if you tick *Stay signed in*.
+They are refreshed before they expire and never sent to the page.
+
+### OpenCode
+
+Paste an OpenCode Console (Zen) API key from <https://opencode.ai/zen>. Every
+text model is called through OpenCode's OpenAI-compatible endpoint. The
+free models are left out of the list, since OpenCode serves them only to its
+own app.
 
 ## Run it
 
@@ -58,7 +81,8 @@ Pick one of these:
   computer*, which saves
   it to `.keys.json` in this folder (readable only by you on macOS and Linux).
 - **In `.env`.** Copy `.env.example` to `.env` and fill in
-  `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY` or `DASHSCOPE_API_KEY`.
+  `ANTHROPIC_API_KEY`, `OPENCODE_API_KEY`, `DEEPSEEK_API_KEY` or
+  `DASHSCOPE_API_KEY`. (ChatGPT has no key: sign in from Settings.)
 
 What happens to a key:
 

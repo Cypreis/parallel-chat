@@ -119,13 +119,14 @@ export async function createAnthropicProvider({ model = process.env.PC_MODEL || 
     name: "anthropic",
     model,
 
-    async *stream({ system, cacheSystem = false, messages, tools = [], signal } = {}) {
+    async *stream({ system, cacheSystem = false, messages, tools = [], thinking = "auto", signal } = {}) {
       const params = {
         model,
         max_tokens: 64000,
         system: cacheSystem ? [{ type: "text", text: system, cache_control: { type: "ephemeral" } }] : system,
         messages,
-        output_config: { effort: "medium" },
+        // The user's thinking level; "auto" keeps medium (Claude Opus 5.5's own default).
+        output_config: { effort: ["low", "medium", "high", "max"].includes(thinking) ? thinking : "medium" },
       };
       if (tools.length) params.tools = tools.map((t) => ({ ...t, eager_input_streaming: true }));
       const stream = client.messages.stream(params, { signal });

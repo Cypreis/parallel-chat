@@ -135,7 +135,7 @@ export function toOpenAITools(tools) {
 // ---------- SSE ----------
 
 // Yields the data payload of each server-sent event; bytes may split anywhere.
-async function* sseData(body, signal) {
+export async function* sseData(body, signal) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
@@ -391,6 +391,25 @@ export async function listDeepSeekModels({ baseURL = DEEPSEEK_BASE, apiKey, fetc
   const models = openAIList(body);
   if (!models) throw new Error("DeepSeek API: unexpected model list shape");
   return sortById(models);
+}
+
+// OpenCode (opencode.ai, the Console / Zen gateway): one API key for many
+// models. Every text model is reachable through the OpenAI-compatible
+// chat/completions endpoint (the gateway translates), so this provider uses
+// it for all of them. From opencode.ai/docs/zen, fetched 2026-11-20.
+// UNTESTED against the real gateway (no key here); only against the local fake.
+export const OPENCODE_BASE = "https://opencode.ai/inference/openai/v1";
+export const OPENCODE_MODELS_URL = "https://opencode.ai/inference/v1/models";
+
+// Not chat models, or free models the gateway serves only to the OpenCode app.
+const OPENCODE_SKIP = /(^|-)free$|image|banana|decision|^jev-/i;
+
+// OpenCode: GET https://opencode.ai/inference/v1/models (OpenAI list shape).
+export async function listOpenCodeModels({ modelsURL = OPENCODE_MODELS_URL, apiKey, fetch: doFetch = globalThis.fetch }) {
+  const body = await getJSON(doFetch, modelsURL, apiKey, "OpenCode");
+  const models = openAIList(body);
+  if (!models) throw new Error("OpenCode API: unexpected model list shape");
+  return sortById(models.filter((m) => !OPENCODE_SKIP.test(m.id)));
 }
 
 // Qwen: GET {origin}/api/v1/models (paged); then GET {base}/models (OpenAI

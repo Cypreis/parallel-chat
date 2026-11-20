@@ -4,12 +4,13 @@ import { networkInterfaces } from "node:os";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createEngine, HttpError, LENGTHS, MAX_CARDS, MODES } from "./engine.mjs";
+import { createEngine, HttpError, LENGTHS, MAX_CARDS, MODES, THINKING } from "./engine.mjs";
 import { createStore } from "./store.mjs";
 import { createLog } from "./log.mjs";
 import { createRegistry } from "./providers/registry.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const KATEX_DIR = path.join(ROOT, "node_modules", "katex", "dist");
 const MAX_BODY = 32 * 1024 * 1024; // attached documents travel as text in the body
 
 const TYPES = {
@@ -39,7 +40,8 @@ const PLACEHOLDER =
   "  POST /api/nodes/:cardId/reply | branch | followup { text, quote? }.\n" +
   "Providers: GET /api/providers, POST /api/providers/:id/key { apiKey, region?, baseURL?, remember? },\n" +
   "  POST /api/providers/:id/models, DELETE /api/providers/:id/key, POST /api/config { provider, model }.\n" +
-  "  Provider ids: anthropic, deepseek, qwen. These calls must come from this origin.\n";
+  "  ChatGPT signs in instead: POST /api/providers/chatgpt/login { remember? }, POST .../login/complete { url },\n" +
+  "  DELETE .../login. Provider ids: anthropic, deepseek, qwen, opencode, chatgpt. These calls must come from this origin.\n";
 
 const isJSON = (req) => /^application\/json\b/i.test(String(req.headers["content-type"] ?? ""));
 const hasBody = (req) => Number(req.headers["content-length"] ?? 0) > 0 || req.headers["transfer-encoding"] !== undefined;
@@ -169,6 +171,7 @@ export async function startServer({
     if (MODES.includes(saved.mode)) base.mode = saved.mode;
     if (Number.isInteger(saved.maxCards) && saved.maxCards >= 1 && saved.maxCards <= MAX_CARDS) base.maxCards = saved.maxCards;
     if (LENGTHS.includes(saved.length)) base.length = saved.length;
+    if (THINKING.includes(saved.thinking)) base.thinking = saved.thinking;
     if (Object.keys(base).length) engine.setConfig(base);
     if (typeof saved.provider !== "string") return;
     try {
@@ -321,6 +324,26 @@ export async function startServer({
       guard(req, { json: false });
       return sendJson(res, 200, registry.list());
     }
+    const signIn = /^\/api\/providers\/([^/]+)\/login(\/complete)?$/.exec(p);
+    if (signIn) {
+      const id = decodeId(signIn[1]);
+      if (m === "POST" && !signIn[2]) {
+        guard(req, { json: true });
+        const body = await readJson(req);
+        const appURL = `http://${String(req.headers.host ?? "").toLowerCase()}/`; // guard checked the Host
+        return sendJson(res, 200, { provider: await registry.startLogin(id, body, { appURL }) });
+      }
+      if (m === "POST" && signIn[2]) {
+        guard(req, { json: true });
+        const provider = await registry.completeLogin(id, await readJson(req));
+        return sendJson(res, 200, { provider });
+      }
+      if (m === "DELETE" && !signIn[2]) {
+        guard(req, { json: false });
+        req.resume();
+        return sendJson(res, 200, { provider: registry.cancelLogin(id) });
+      }
+    }
     const match = /^\/api\/providers\/([^/]+)\/(key|models)$/.exec(p);
     if (match) {
       const id = decodeId(match[1]);
@@ -384,6 +407,8 @@ export async function startServer({
       return sendText(res, 405, "Method not allowed\n");
     }
     if (p === "/shared" || p.startsWith("/shared/")) return serveStatic(req, res, sharedDir, p.slice("/shared".length));
+    // KaTeX (math in cards), from npm install; without it math shows as source.
+    if (p.startsWith("/vendor/katex/")) return serveStatic(req, res, KATEX_DIR, p.slice("/vendor/katex".length));
     return serveStatic(req, res, publicDir, p, { placeholder: p === "/" });
   }
 
@@ -407,6 +432,7 @@ export async function startServer({
 
   async function close() {
     engine.shutdown();
+    registry.close?.(); // a ChatGPT sign-in still waiting on its callback port
     await store?.flush();
     for (const s of [...streams]) {
       s.cleanup();

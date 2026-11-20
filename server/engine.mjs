@@ -39,8 +39,8 @@ export { RELS, LENGTHS };
 export const THINKING = ["auto", "low", "medium", "high", "max"];
 export const SHAPES = ["single", "parallel", "comparison", "steps"];
 export const MODES = ["single", "fanout"];
-export const MAX_CARDS = 6; // highest allowed maxCards
-export const DEFAULT_MAX_CARDS = 4;
+export const MAX_CARDS = 10; // highest allowed maxCards
+export const DEFAULT_MAX_CARDS = 6;
 const MAX_ROUNDS = { answer: 8, reply: 4, write: 3 };
 export const MAX_DOCS = 10; // files per request
 export const MAX_DOC_CHARS = 2_000_000; // text of one file (the model is sent at most DOC_CHARS of it)
@@ -141,17 +141,24 @@ function parseInput(call, tool) {
 // provider active when it starts and keeps it for every round.
 export function createEngine({ log, provider, registry = null, mode = "fanout", maxCards = DEFAULT_MAX_CARDS, length = "auto", thinking = "auto", logger = console }) {
   const acquire = registry ? () => registry.acquire() : () => provider;
+  // The planning model, when one is set and its provider still has a key.
+  const acquirePlanner = () => {
+    const p = config.planner;
+    const bound = p && registry ? registry.acquireWith(p.provider, p.model) : null;
+    return bound ? { provider: bound, thinking: p.thinking } : null;
+  };
   const config = {
     mode: MODES.includes(mode) ? mode : "fanout",
     maxCards: Number.isInteger(maxCards) && maxCards >= 1 && maxCards <= MAX_CARDS ? maxCards : DEFAULT_MAX_CARDS,
     length: LENGTHS.includes(length) ? length : "auto",
     thinking: THINKING.includes(thinking) ? thinking : "auto",
+    planner: null, // { provider, model, thinking }: a cheaper model that plans fan-out answers
   };
-  const counters = { n: 0, e: 0, d: 0, g: 0, f: 0 };
+  const counters = { n: 0, e: 0, d: 0, g: 0, f: 0, o: 0 }; // o: saved-card folders
   // A restored log: new ids continue after every id it holds (redacted events keep theirs in ref).
   for (const ev of log.since(0)) {
-    for (const id of [ev.node?.id, ev.edge?.id, ev.decision?.id, ev.group?.id, ev.doc?.id, ev.ref]) {
-      const m = /^([nedgf])_(\d+)$/.exec(id ?? "");
+    for (const id of [ev.node?.id, ev.edge?.id, ev.decision?.id, ev.group?.id, ev.doc?.id, ev.folder?.id, ev.ref]) {
+      const m = /^([nedgfo])_(\d+)$/.exec(id ?? "");
       if (m) counters[m[1]] = Math.max(counters[m[1]], Number(m[2]));
     }
   }
@@ -305,7 +312,7 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
   // hooks: text(text, round), toolStart(call), toolDelta(call, json),
   // toolEnd(call), execute(call) -> tool_result, afterRound(calls),
   // finished() -> stop after this round, abandon(calls, message, { retry }).
-  async function converse(provider, job, ctx, tools, meta, hooks, maxRounds) {
+  async function converse(provider, job, ctx, tools, meta, hooks, maxRounds, { thinking = config.thinking } = {}) {
     const messages = [...ctx.messages];
     let retries = 0;
     for (let round = 1; round <= maxRounds; round++) {
@@ -318,7 +325,7 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
           cacheSystem: !!ctx.cacheSystem,
           messages: [...messages],
           tools,
-          thinking: config.thinking,
+          thinking,
           signal: job.signal,
           meta: { ...meta, round },
         });
@@ -525,7 +532,10 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
     };
   }
 
-  async function runAnswer(qjob, question, { mode, maxCards, provider, length }) {
+  // planner: the provider that plans a fan-out answer (the planning model
+  // setting), else the writer's. In single mode one call writes every card,
+  // so the writer's provider does it all.
+  async function runAnswer(qjob, question, { mode, maxCards, provider, planner = null, length }) {
     const qid = qjob.nodeId;
     const fanout = mode === "fanout";
     const ctx = withLength(buildAskContext(log.state, qid, { maxCards, mode }), length);
@@ -540,7 +550,9 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
       sections: ctx.sections,
     };
     try {
-      await converse(provider, qjob, ctx, fanout ? [PLAN_CARD, LINK_CARDS] : [CREATE_CARD, LINK_CARDS], meta, hooks, MAX_ROUNDS.answer);
+      const planning = fanout && planner;
+      if (planning) meta.planner = { provider: planner.provider.name, model: planner.provider.model };
+      await converse(planning ? planner.provider : provider, qjob, ctx, fanout ? [PLAN_CARD, LINK_CARDS] : [CREATE_CARD, LINK_CARDS], meta, hooks, MAX_ROUNDS.answer, planning ? { thinking: planner.thinking } : {});
       if (!live(qjob)) return;
       if (!hooks.created) {
         // The model answered without cards: its text becomes one card.
@@ -604,7 +616,9 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
       finished: () => wrote,
     };
     try {
-      await converse(provider, job, ctx, [WRITE_CARD], meta, hooks, MAX_ROUNDS.write);
+      // A card is a short, planned piece of text: unless the person chose a thinking level, a writer thinks little
+      // (the planner and the replies keep the provider's default). Fewer reasoning tokens on every card of every answer.
+      await converse(provider, job, ctx, [WRITE_CARD], meta, hooks, MAX_ROUNDS.write, { thinking: config.thinking === "auto" ? "low" : config.thinking });
       if (!live(job)) return;
       if (!wrote) {
         const body = text.trim();
@@ -905,7 +919,7 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
     // Attached files join the chat before its context is built.
     for (const d of docs) addDoc(chatId ?? qid, d);
     const job = startJob(qid);
-    track(runAnswer(job, text, { mode, maxCards, length, provider: acquire() }));
+    track(runAnswer(job, text, { mode, maxCards, length, provider: acquire(), planner: acquirePlanner() }));
     return { turnId: qid };
   }
 
@@ -1240,6 +1254,68 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
     return { targetId, note: log.state.notes[targetId] ?? null };
   }
 
+  // Saved cards: kept by the person, shown on the saved board.
+  function saveCard(id, body) {
+    strictCard(id);
+    if (typeof body?.saved !== "boolean") throw new HttpError(400, "saved must be true or false");
+    if (body.saved !== !!log.state.saved[id]) {
+      const ev = { id, saved: body.saved };
+      if (body.saved) for (const k of ["w", "h"]) if (Number.isFinite(body[k])) ev[k] = body[k];
+      if (body.saved && body.folderId !== undefined && body.folderId !== null) {
+        if (!log.state.folders.some((f) => f.id === body.folderId)) throw new HttpError(404, `unknown folder ${body.folderId}`);
+        ev.folderId = body.folderId;
+      }
+      log.append("card.save", ev);
+    }
+    return { id, saved: log.state.saved[id] ?? null };
+  }
+
+  // Folders for saved cards.
+  function addFolder(body) {
+    const name = shortName(body?.name, "name", 60);
+    if (log.state.folders.length >= 200) throw new HttpError(400, "too many folders");
+    const folder = { id: newId("o"), name };
+    log.append("folder.add", { folder });
+    return { folder };
+  }
+  function patchFolder(id, body) {
+    if (!log.state.folders.some((f) => f.id === id)) throw new HttpError(404, `unknown folder ${id}`);
+    log.append("folder.patch", { id, patch: { name: shortName(body?.name, "name", 60) } });
+    return { folder: log.state.folders.find((f) => f.id === id) };
+  }
+  function removeFolder(id) {
+    if (!log.state.folders.some((f) => f.id === id)) throw new HttpError(404, `unknown folder ${id}`);
+    log.append("folder.remove", { id });
+    return { id };
+  }
+
+  function placeSaved(id, body) {
+    if (!log.state.saved[id]) throw new HttpError(404, `${id} is not a saved card`);
+    const patch = {};
+    if (body?.x !== undefined || body?.y !== undefined) {
+      if (!Number.isFinite(body.x) || !Number.isFinite(body.y) || Math.abs(body.x) > 1e6 || Math.abs(body.y) > 1e6) throw new HttpError(400, "x and y must be numbers");
+      patch.x = body.x;
+      patch.y = body.y;
+    }
+    if (body?.follow !== undefined) {
+      if (typeof body.follow !== "boolean") throw new HttpError(400, "follow must be true or false");
+      patch.follow = body.follow;
+    }
+    if (body?.folderId !== undefined) {
+      if (body.folderId !== null && !log.state.folders.some((f) => f.id === body.folderId)) throw new HttpError(404, `unknown folder ${body.folderId}`);
+      patch.folderId = body.folderId;
+    }
+    for (const k of ["w", "h"]) {
+      if (body?.[k] === undefined) continue;
+      if (k === "h" && body.h === null) patch.h = null;
+      else if (Number.isFinite(body[k]) && body[k] >= 120 && body[k] <= 4000) patch[k] = body[k];
+      else throw new HttpError(400, `${k} must be a number from 120 to 4000`);
+    }
+    if (!Object.keys(patch).length) throw new HttpError(400, "send x and y, w and/or h, and/or follow");
+    log.append("card.place", { id, patch });
+    return { id, saved: log.state.saved[id] };
+  }
+
   function docList(value) {
     if (value === undefined || value === null) return [];
     if (!Array.isArray(value)) throw new HttpError(400, "docs must be an array");
@@ -1283,7 +1359,19 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
 
   function getConfig() {
     const active = registry ? registry.activeConfig() : { provider: provider.name, model: provider.model };
-    return { provider: active.provider, model: active.model, mode: config.mode, maxCards: config.maxCards, length: config.length, thinking: config.thinking };
+    return { provider: active.provider, model: active.model, mode: config.mode, maxCards: config.maxCards, length: config.length, thinking: config.thinking, planner: config.planner ? { ...config.planner } : null };
+  }
+
+  // null clears it; else { provider, model, thinking? } with a provider that has a key.
+  function checkPlanner(p) {
+    if (p === null) return null;
+    if (typeof p !== "object" || Array.isArray(p)) throw new HttpError(400, "planner must be null or { provider, model, thinking? }");
+    if (!registry) throw new HttpError(400, "this server runs a fixed provider");
+    if (typeof p.model !== "string" || !p.model.trim()) throw new HttpError(400, "planner.model is required");
+    const thinking = p.thinking ?? "low";
+    if (!THINKING.includes(thinking)) throw new HttpError(400, `planner.thinking must be one of: ${THINKING.join(", ")}`);
+    const { id, model } = registry.check(p.provider, p.model);
+    return { provider: id, model, thinking };
   }
 
   // Everything is validated before anything is applied.
@@ -1294,7 +1382,10 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
     const hasModel = body?.model !== undefined;
     const hasLength = body?.length !== undefined;
     const hasThinking = body?.thinking !== undefined;
-    if (!hasMode && !hasMax && !hasProvider && !hasModel && !hasLength && !hasThinking) throw new HttpError(400, "send mode, maxCards, length, thinking, provider and/or model");
+    const hasPlanner = body?.planner !== undefined;
+    if (!hasMode && !hasMax && !hasProvider && !hasModel && !hasLength && !hasThinking && !hasPlanner) throw new HttpError(400, "send mode, maxCards, length, thinking, planner, provider and/or model");
+    let planner;
+    if (hasPlanner) planner = checkPlanner(body.planner);
     if (hasLength && !LENGTHS.includes(body.length)) throw new HttpError(400, `length must be one of: ${LENGTHS.join(", ")}`);
     if (hasThinking && !THINKING.includes(body.thinking)) throw new HttpError(400, `thinking must be one of: ${THINKING.join(", ")}`);
     if (hasMode && !MODES.includes(body.mode)) throw new HttpError(400, `mode must be one of: ${MODES.join(", ")}`);
@@ -1310,6 +1401,7 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
     if (hasMax) config.maxCards = body.maxCards;
     if (hasLength) config.length = body.length;
     if (hasThinking) config.thinking = body.thinking;
+    if (hasPlanner) config.planner = planner;
     if (next) registry.activate(next);
     return getConfig();
   }
@@ -1364,6 +1456,11 @@ export function createEngine({ log, provider, registry = null, mode = "fanout", 
     patchGroup,
     removeGroup,
     setNote,
+    saveCard,
+    placeSaved,
+    addFolder,
+    patchFolder,
+    removeFolder,
     addDocs,
     removeDoc,
     context,

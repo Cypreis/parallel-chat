@@ -74,7 +74,7 @@ test("mock planner derives titles and shapes from the question", () => {
     two.cards.map((c) => c.title),
     ["Store events", "Stream them to the browser"],
   );
-  assert.deepEqual(two.links, [{ from: "c1", to: "c2", rel: "feeds" }]);
+  assert.deepEqual(two.links, [{ from: "c2", to: "c1", rel: "elaborates" }]);
   const single = derivePlan("What is SSE?");
   assert.equal(single.shape, "single");
   assert.equal(single.cards[0].title, "SSE");
@@ -205,9 +205,9 @@ test("the card cap: a create_card past maxCards gets an error result and creates
   assert.match(errors[0].content, /Card limit reached: this answer may create at most 2 cards/);
   assert.match(errors[1].content, /Unknown card "c3"/);
   assert.match(provider.calls[0].messages[0].content[0].text, /Card limit for this answer: 2 cards\./);
-  assert.throws(() => engine.setConfig({ maxCards: 7 }), /maxCards must be an integer from 1 to 6/);
-  assert.equal(engine.setConfig({ maxCards: 6 }).maxCards, 6);
-  assert.equal(engine.setConfig({ mode: "fanout" }).maxCards, 6, "either field alone");
+  assert.throws(() => engine.setConfig({ maxCards: 11 }), /maxCards must be an integer from 1 to 10/);
+  assert.equal(engine.setConfig({ maxCards: 10 }).maxCards, 10);
+  assert.equal(engine.setConfig({ mode: "fanout" }).maxCards, 10, "either field alone");
 });
 
 test("cross-chat links: by a later question and by a thread reply", async () => {

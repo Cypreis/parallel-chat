@@ -94,11 +94,27 @@ describe("math in Markdown", () => {
     assert.equal(katexCount(renderMarkdown("```math\n\\frac{a}{b}\n```")), 1);
   });
 
-  test("a formula still streaming shows as quiet source, not stray text", () => {
+  test("a formula still streaming shows a quiet ellipsis, never its source", () => {
     const html = renderMarkdown("$$\n\\sum_{i=1}^n i");
     assert.match(html, /math-block pending/);
     assert.equal(katexCount(html), 0);
-    assert.match(renderMarkdown("Total $$\\sum_i"), /math-src pending/);
+    assert.match(renderMarkdown("Total $$\\sum_i"), /math-wait/);
+  });
+
+  test("what models really write: spaced dollars, bare environments, wrapped lines, pipes, text commands", () => {
+    const visible = (html) => html.replace(/<annotation[\s\S]*?<\/annotation>/g, "").replace(/<[^>]+>/g, " ");
+    const noRaw = (md) => assert.ok(!/\\[a-zA-Z]+|\$/.test(visible(renderMarkdown(md))), md);
+    noRaw("The price is $ S_t = S_0 e^{\\mu t} $ here.");
+    noRaw("\\begin{aligned}\nd_1 &= \\frac{a}{b} \\\\\nd_2 &= d_1\n\\end{aligned}");
+    noRaw("We get \\begin{cases} 1 & x>0 \\\\ 0 & \\text{else} \\end{cases} here.");
+    noRaw("Inline that wraps: $a + b\n+ c = d$ done.");
+    noRaw("| a | b |\n|---|---|\n| $|x|$ | y |");
+    noRaw("**Vega** $\\nu = S\\phi$ and _gamma_ $\\Gamma$.");
+    noRaw("A \\textbf{bold} \\emph{word}, 5\\% and R\\&D.");
+    noRaw("Partial $\\frac{a}{b");
+    assert.equal(katexCount(renderMarkdown("| a | b |\n|---|---|\n| $|x|$ | y |")), 1, "the pipes stay inside the formula");
+    // two prices are text, not a formula
+    assert.match(renderMarkdown("Costs $5 to $10, a 5$ fee."), /Costs \$5 to \$10, a 5\$ fee\./);
   });
 
   test("math in code stays code; math in tables renders", () => {

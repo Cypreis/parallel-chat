@@ -11,6 +11,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { appendFile, truncate } from "node:fs/promises";
 import path from "node:path";
+import { jsonOf } from "./log.mjs";
 
 const FLUSH_MS = 30;
 
@@ -112,7 +113,7 @@ export function createStore({ dir, logger = console }) {
     loadEvents,
     loadConfig,
     append(event) {
-      ops.push({ kind: "append", text: JSON.stringify(event) + "\n" });
+      ops.push({ kind: "append", text: jsonOf(event) + "\n" });
       schedule();
     },
     // Empty the log file (POST /api/reset). Ordered with the appends around it.
@@ -128,8 +129,8 @@ export function createStore({ dir, logger = console }) {
       schedule();
     },
     saveConfig(config) {
-      const { provider, model, mode, maxCards, length, thinking } = config;
-      atomicWrite(configFile, JSON.stringify({ provider, model, mode, maxCards, length, thinking }, null, 2) + "\n");
+      const { provider, model, mode, maxCards, length, thinking, planner } = config;
+      atomicWrite(configFile, JSON.stringify({ provider, model, mode, maxCards, length, thinking, planner: planner ?? null }, null, 2) + "\n");
     },
     // Write everything queued so far.
     async flush() {

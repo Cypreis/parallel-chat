@@ -66,7 +66,7 @@ them, the card limit, and lists every existing card in every chat with its
 id, chat number, title and summary so it can link new cards to old ones.
 Thread replies are plain text, with `link_cards` available.
 
-`maxCards` (config, 1 to 6, default 4) caps the cards one chat's answer may
+`maxCards` (config, 1 to 10, default 6) caps the cards one chat's answer may
 create; a `create_card` call past the cap returns an error result.
 
 ## Events
@@ -339,3 +339,17 @@ data: {"seq":42,"ts":1731580000000,"type":"node.delta","id":"n_7","field":"body"
 
 A `: ping` comment is sent every 15 seconds. Deltas for different nodes
 interleave freely; that interleaving is the point.
+
+## Saved cards
+
+`state.folders` is the list of folders `{ id, name }` the person made for saved cards. `state.saved` maps a card id to `{ ts, follow, folderId?, x?, y?, w?, h? }`: a card the person
+kept, whether its follow-ups show on the saved board (default true), and where
+it was dragged (absent until moved; the page places such cards itself).
+
+| Method and path | Body | Effect |
+| --- | --- | --- |
+| `POST /api/cards/:id/save` | `{ saved: boolean, folderId?, w?, h? }` | save or unsave a card (`card.save` event); saving twice writes nothing |
+| `POST /api/folders` · `PATCH /api/folders/:id` · `DELETE /api/folders/:id` | `{ name }` | make, rename or delete a folder (its cards stay saved, with no folder) |
+| `PATCH /api/saved/:id` | `{ x, y }`, `{ w, h }`, `{ follow }` and/or `{ folderId }` (null: no folder) | move a saved card, or show or hide its follow-ups (`card.place` event); 404 when the card is not saved |
+
+Deleting a chat removes its saved cards.

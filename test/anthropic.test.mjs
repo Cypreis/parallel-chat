@@ -130,7 +130,7 @@ describe("Anthropic provider against a local fake API", { skip: sdkMissing && "@
           { type: "thinking", signature: "sig-abc" },
           { type: "text", text: "One card." },
           { type: "tool_use", id: "toolu_1", name: "create_card", json: CARD_JSON },
-          { type: "tool_use", id: "toolu_2", name: "link_cards", json: '{"from":"c1","to":"nope","rel":"feeds"}' },
+          { type: "tool_use", id: "toolu_2", name: "link_cards", json: '{"from":"c1","to":"nope","rel":"elaborates"}' },
         ],
         "tool_use",
       ),

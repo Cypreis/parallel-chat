@@ -112,7 +112,7 @@ test("follow-up context has the documented order and sections", () => {
 });
 
 test("the system prompt explains how to build the board", () => {
-  for (const phrase of ["create_card", "link_cards", "card limit", "key", "depends_on", "feeds", "contradicts", "alternative_to", "elaborates", "earlier chat"]) {
+  for (const phrase of ["create_card", "link_cards", "card limit", "key", "elaborates", "sub-card", "Sub-cards"]) {
     assert.ok(SYSTEM_PROMPT.includes(phrase), phrase);
   }
   assert.ok(!/\b(MUST|NEVER|ALWAYS|IMPORTANT)\b/.test(SYSTEM_PROMPT), "explanation, not capitalised orders");

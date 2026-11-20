@@ -150,12 +150,12 @@ describe("end to end (mock provider)", () => {
 
   test("config, validation and static files", async () => {
     const cfg = await api(base, "GET", "/api/config");
-    assert.deepEqual(cfg, { status: 200, body: { provider: null, model: null, mode: "fanout", maxCards: 4, length: "auto", thinking: "auto" } });
+    assert.deepEqual(cfg, { status: 200, body: { provider: null, model: null, mode: "fanout", maxCards: 6, length: "auto", thinking: "auto", planner: null } });
     assert.equal((await api(base, "POST", "/api/config", { mode: "nope" })).status, 400);
     assert.equal((await api(base, "POST", "/api/config", { maxCards: 0 })).status, 400);
     assert.equal((await api(base, "POST", "/api/config", {})).status, 400);
     assert.equal((await api(base, "POST", "/api/config", { maxCards: 5 })).body.maxCards, 5);
-    assert.deepEqual((await api(base, "POST", "/api/config", { maxCards: 4 })).body, cfg.body);
+    assert.deepEqual((await api(base, "POST", "/api/config", { maxCards: 6 })).body, cfg.body);
     assert.equal((await api(base, "POST", "/api/ask", {})).status, 400);
     const bad = await api(base, "POST", "/api/ask", undefined, { raw: "{not json" });
     assert.equal(bad.status, 400);
@@ -377,7 +377,7 @@ describe("end to end (mock provider)", () => {
     const open2 = seqOf((e) => e.type === "node.open" && e.node.id === cards[1].id);
     const close1 = seqOf((e) => e.type === "node.close" && e.id === cards[0].id);
     assert.ok(close1 < open2, "card 2 opens after card 1 closes");
-    assert.ok(s.edges.some((e) => e.from === cards[0].id && e.to === cards[1].id && e.rel === "feeds"));
+    assert.ok(s.edges.some((e) => e.from === cards[1].id && e.to === cards[0].id && e.rel === "elaborates"));
     await api(base, "POST", "/api/config", { mode: "fanout" });
   });
 
@@ -434,7 +434,7 @@ describe("end to end (mock provider)", () => {
     assert.equal(stream.events.at(-1).seq, last + 1);
     assert.deepEqual(stream.state.nodes, {});
     const st = await api(base, "GET", "/api/state");
-    assert.deepEqual(st.body, { seq: last + 1, nodes: {}, order: [], edges: [], decisions: [], chatMeta: {}, groups: [], notes: {}, docs: [] });
+    assert.deepEqual(st.body, { seq: last + 1, nodes: {}, order: [], edges: [], decisions: [], chatMeta: {}, groups: [], notes: {}, docs: [], saved: {}, folders: [] });
     const fresh = sse(base, { since: 0 });
     await fresh.ready;
     await fresh.waitFor((_, evs) => evs.length === 1, "fresh replay");

@@ -117,7 +117,7 @@ async function startFake() {
     let spec;
     if (req.method === "POST" && url.pathname === "/oauth/token") spec = (fake.token ?? defaultToken)(body);
     else if (req.method === "GET" && url.pathname === "/models") spec = fake.models(entry);
-    else if (req.method === "GET" && url.pathname === "/v1/models") spec = { status: 200, json: { object: "list", data: [{ id: "kimi-k3" }, { id: "big-pickle-free" }, { id: "gpt-image-2.5-sunburst" }, { id: "glm-5.3" }] } };
+    else if (req.method === "GET" && url.pathname === "/v1/models") spec = { status: 200, json: { object: "list", data: [{ id: "kimi-k3", type: "chat", name: "Kimi K3", limit: { context: 1048576, output: 65536 } }, { id: "big-pickle-free", type: "chat" }, { id: "gpt-image-2.5-sunburst", type: "image" }, { id: "text-embedding-9", type: "embedding" }, { id: "glm-5.3", type: "chat" }] } };
     else if (req.method === "POST" && url.pathname === "/responses") spec = fake.responses.length ? fake.responses.shift() : brain(body);
     else if (req.method === "POST" && url.pathname === "/chat/completions") {
       const chunk = (delta, finish = null) => ({ choices: [{ index: 0, delta, finish_reason: finish }] });
@@ -366,7 +366,7 @@ describe("ChatGPT sign-in through /api/providers", () => {
   });
 
   test("start: a PKCE authorize address for Codex's client, nothing signed in yet", async () => {
-    const r = await api("POST", "/api/providers/chatgpt/login", { remember: true });
+    const r = await api("POST", "/api/providers/chatgpt/login", {}); // saved by default
     assert.equal(r.status, 200);
     const p = r.body.provider;
     assert.equal(p.hasKey, false);
@@ -466,14 +466,14 @@ describe("ChatGPT sign-in through /api/providers", () => {
     assert.equal((await chatgpt()).login.pending, false);
     assert.match((await chatgpt()).login.error, /bad code/);
 
-    r = await api("POST", "/api/providers/chatgpt/login", {});
+    r = await api("POST", "/api/providers/chatgpt/login", { remember: false });
     const u2 = new URL(r.body.provider.login.url);
     fake.challenge = u2.searchParams.get("code_challenge");
     assert.equal((await api("POST", "/api/providers/chatgpt/login/complete", { url: "garbage!!" })).status, 400);
     r = await api("POST", "/api/providers/chatgpt/login/complete", { url: `http://localhost:1455/auth/callback?code=good-code&state=${u2.searchParams.get("state")}` });
     assert.equal(r.status, 200);
     assert.equal(r.body.provider.hasKey, true);
-    assert.equal(r.body.provider.remembered, false, "not remembered this time: the old file entry is gone");
+    assert.equal(r.body.provider.remembered, false, "remember: false: the old file entry is gone");
     assert.equal(existsSync(keysFile) ? JSON.parse(readFileSync(keysFile, "utf8")).chatgpt : undefined, undefined);
   });
 
@@ -491,7 +491,8 @@ describe("ChatGPT sign-in through /api/providers", () => {
   test("OpenCode: key, filtered model list, and a chat through its OpenAI-compatible endpoint", async () => {
     let r = await api("POST", "/api/providers/opencode/key", { apiKey: OC_KEY });
     assert.equal(r.status, 200);
-    assert.deepEqual(r.body.provider.models.map((m) => m.id), ["glm-5.3", "kimi-k3"], "free and image models left out");
+    assert.deepEqual(r.body.provider.models.map((m) => m.id), ["glm-5.3", "kimi-k3"], "only chat models, and no free ones");
+    assert.deepEqual(r.body.provider.models[1], { id: "kimi-k3", label: "Kimi K3", contextWindow: 1048576, maxOutput: 65536 });
     assert.equal(fake.of("/v1/models").at(-1).headers.authorization, `Bearer ${OC_KEY}`);
     r = await api("POST", "/api/config", { provider: "opencode", model: "kimi-k3", mode: "single" });
     assert.equal(r.status, 200);
@@ -503,6 +504,29 @@ describe("ChatGPT sign-in through /api/providers", () => {
     const req = fake.of("/chat/completions").at(-1);
     assert.equal(req.body.model, "kimi-k3");
     assert.equal(req.body.thinking, undefined);
+    assert.equal(req.headers["user-agent"], "parallel-chat", "OpenCode asks clients to name themselves");
+    assert.match(req.headers["x-opencode-session"], /^[0-9a-f-]{36}$/);
+    reg.close();
+  });
+
+  test("OpenCode Go: its own provider, key and model list, same Console key from the environment", async () => {
+    const reg = createRegistry({
+      env: { OPENCODE_API_KEY: OC_KEY },
+      keysFile: null,
+      logger,
+      endpoints: { opencodego: fake.url, opencodegoModels: `${fake.url}/v1/models` },
+    });
+    assert.equal(reg.info("opencodego").keySource, "env");
+    assert.equal(reg.info("opencodego").label, "OpenCode Go (subscription)");
+    const info = await reg.refreshModels("opencodego");
+    assert.deepEqual(info.models.map((m) => m.id), ["glm-5.3", "kimi-k3"]);
+    reg.activate({ id: "opencodego", model: "glm-5.3" });
+    const events = await collect(reg.acquire().stream({ system: "S", messages: [{ role: "user", content: "hi" }] }));
+    assert.equal(events.at(-1).content[0].text, "From OpenCode.");
+    const first = reg.acquire().stream({ system: "S", messages: [{ role: "user", content: "again" }] });
+    await collect(first);
+    const sessions = fake.of("/chat/completions").slice(-2).map((r) => r.headers["x-opencode-session"]);
+    assert.equal(sessions[0], sessions[1], "one stable session id");
     reg.close();
   });
 });

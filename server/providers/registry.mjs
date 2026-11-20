@@ -2,14 +2,15 @@
 // model last chosen for each, and which one is active.
 //
 // Keys, highest priority first: posted from the page (memory); .keys.json in
-// the app folder (written only when the page asks to remember);
+// the app folder (written whenever a key is added in the page, unless the
+// request says remember: false);
 // environment (ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN, DEEPSEEK_API_KEY,
 // DASHSCOPE_API_KEY with DASHSCOPE_REGION, OPENCODE_API_KEY). A key is never
 // logged, never returned (only its last four characters), and scrubbed from
 // upstream errors.
 //
 // ChatGPT has no key: the page starts a sign-in (startLogin) and the tokens
-// it ends with are kept like a key (memory, or .keys.json when remembered),
+// it ends with are kept like a key (in memory and in .keys.json),
 // refreshed shortly before they expire, and never returned to the page (only
 // the account's email and plan).
 //
@@ -26,10 +27,12 @@
 // DeepSeek and Qwen are only tested against a local fake server (see
 // openai-compat.mjs).
 
+import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { HttpError } from "../engine.mjs";
+import { createLimiter, limitProvider } from "./flow.mjs";
 import { createAnthropicProvider, listAnthropicModels } from "./anthropic.mjs";
 import {
   CHATGPT_API_BASE,
@@ -43,13 +46,17 @@ import {
   refreshCredential,
 } from "./chatgpt.mjs";
 import {
+  COMPAT_PROVIDERS,
   createOpenAICompatProvider,
   DEEPSEEK_BASE,
   isAuthError,
+  listCompatModels,
   listDeepSeekModels,
   listOpenCodeModels,
   listQwenModels,
   OPENCODE_BASE,
+  OPENCODE_GO_BASE,
+  OPENCODE_GO_MODELS_URL,
   OPENCODE_MODELS_URL,
   QWEN_REGIONS,
   scrub,
@@ -57,16 +64,18 @@ import {
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const DEFAULT_KEYS_FILE = path.join(ROOT, ".keys.json");
-export const PROVIDER_IDS = ["anthropic", "deepseek", "qwen", "opencode", "chatgpt"];
+export const PROVIDER_IDS = ["anthropic", "deepseek", "qwen", "opencode", "opencodego", "chatgpt", ...Object.keys(COMPAT_PROVIDERS)];
 const OAUTH = new Set(["chatgpt"]); // signed in, not given a key
 const LABELS = {
   anthropic: "Anthropic",
   deepseek: "DeepSeek",
   qwen: "Qwen (Alibaba Cloud Model Studio)",
   opencode: "OpenCode (Zen)",
+  opencodego: "OpenCode Go (subscription)",
   chatgpt: "ChatGPT (sign in with your plan)",
+  ...Object.fromEntries(Object.entries(COMPAT_PROVIDERS).map(([id, c]) => [id, c.label])),
 };
-const SHORT = { anthropic: "Anthropic", deepseek: "DeepSeek", qwen: "Qwen", opencode: "OpenCode", chatgpt: "ChatGPT" };
+const SHORT = { anthropic: "Anthropic", deepseek: "DeepSeek", qwen: "Qwen", opencode: "OpenCode", opencodego: "OpenCode Go", chatgpt: "ChatGPT", ...Object.fromEntries(Object.entries(COMPAT_PROVIDERS).map(([id, c]) => [id, c.short ?? c.label])) };
 const REFRESH_MARGIN_MS = 5 * 60 * 1000;
 const ANTHROPIC_DEFAULT_MODEL = "claude-opus-5-5";
 
@@ -94,6 +103,8 @@ export function validateBaseURL(raw) {
 
 const qwenRegion = (id) => QWEN_REGIONS.find((r) => r.id === id);
 
+const LOCAL_KEY = "local"; // placeholder: local servers take any bearer token
+
 export const NO_KEY_MESSAGE = "No model is connected yet. Open Settings and sign in with ChatGPT, or add an API key for Anthropic, DeepSeek, Qwen or OpenCode.";
 
 // What answers while no provider has a key: every call fails with NO_KEY_MESSAGE.
@@ -117,6 +128,10 @@ export function createRegistry({
   endpoints = {},
   fetch: doFetch = globalThis.fetch,
   logger = console,
+  // At most this many streams at once per provider; the rest wait their turn (0: no limit).
+  concurrency = Number(env.PC_CONCURRENCY ?? 8),
+  // Retries of a request that failed with the service's trouble (5xx, overload, 429 with Retry-After).
+  retries = Number(env.PC_RETRIES ?? 2),
 } = {}) {
   const fallbackProvider = fallback ?? createUnconfiguredProvider();
   const entries = {};
@@ -143,9 +158,21 @@ export function createRegistry({
     entries.anthropic.env = { apiKey: env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN, fromEnv: true };
   }
   if (env.DEEPSEEK_API_KEY) entries.deepseek.env = { apiKey: env.DEEPSEEK_API_KEY };
+  for (const [id, c] of Object.entries(COMPAT_PROVIDERS)) {
+    const key = c.env.map((n) => env[n]).find(Boolean);
+    if (c.custom) {
+      if (env[c.envBase]) { try { entries[id].env = { apiKey: key || LOCAL_KEY, baseURL: validateBaseURL(env[c.envBase]) }; } catch { /* a bad URL in the environment is ignored */ } }
+    } else if (key) entries[id].env = { apiKey: key };
+  }
   if (env.OPENCODE_API_KEY) entries.opencode.env = { apiKey: env.OPENCODE_API_KEY };
+  // The Go subscription uses the same Console key; its own variable wins.
+  if (env.OPENCODE_GO_API_KEY || env.OPENCODE_API_KEY) entries.opencodego.env = { apiKey: env.OPENCODE_GO_API_KEY || env.OPENCODE_API_KEY };
   const opencodeBase = endpoints.opencode ?? OPENCODE_BASE;
   const opencodeModels = endpoints.opencodeModels ?? OPENCODE_MODELS_URL;
+  const opencodeGoBase = endpoints.opencodego ?? OPENCODE_GO_BASE;
+  const opencodeGoModels = endpoints.opencodegoModels ?? OPENCODE_GO_MODELS_URL;
+  // OpenCode asks clients to name themselves and send one stable session id.
+  const opencodeHeaders = { "user-agent": "parallel-chat", "x-opencode-session": randomUUID() };
   const chatgptIssuer = endpoints.chatgptAuth ?? CHATGPT_ISSUER;
   const chatgptBase = endpoints.chatgpt ?? CHATGPT_API_BASE;
   const loadCodexPrompt = endpoints.codexPrompt ?? createCodexPromptLoader({ fetch: doFetch });
@@ -190,7 +217,7 @@ export function createRegistry({
     }
     if (!entries[id] || typeof saved?.apiKey !== "string" || !saved.apiKey) continue;
     try {
-      const baseURL = id === "qwen" && saved.baseURL ? validateBaseURL(saved.baseURL) : null;
+      const baseURL = (id === "qwen" || COMPAT_PROVIDERS[id]?.custom) && saved.baseURL ? validateBaseURL(saved.baseURL) : null;
       const region = id === "qwen" ? (baseURL ? "custom" : qwenRegion(saved.region)?.baseURL ? saved.region : "intl") : null;
       entries[id].file = { apiKey: saved.apiKey, region, baseURL };
     } catch {
@@ -284,7 +311,8 @@ export function createRegistry({
     requireProvider(id);
     if (!OAUTH.has(id)) throw new HttpError(400, `${SHORT[id]} uses an API key, not a sign-in`);
     if (body.remember !== undefined && typeof body.remember !== "boolean") throw new HttpError(400, "remember must be true or false");
-    return login.start({ remember: body.remember === true, appURL }).then(() => info(id));
+    // Saved to .keys.json unless the caller says remember: false.
+    return login.start({ remember: body.remember !== false, appURL }).then(() => info(id));
   }
 
   async function completeLogin(id, body = {}) {
@@ -331,14 +359,18 @@ export function createRegistry({
       auth: oauth ? "oauth" : "key",
       needsKey: true,
       hasKey: !!cred,
-      keyHint: cred && !oauth ? keyHint(cred.apiKey) : null,
+      keyHint: cred && !oauth && cred.apiKey !== LOCAL_KEY ? keyHint(cred.apiKey) : null,
       account: oauth && cred ? { email: cred.oauth.email, plan: cred.oauth.plan } : null,
       login: oauth ? login.status() : null,
       keySource: cred ? cred.source : null,
       remembered: !!e.file,
       regions: id === "qwen" ? QWEN_REGIONS.map(({ id: rid, label }) => ({ id: rid, label })) : null,
       region: id === "qwen" ? (cred?.region ?? null) : null,
-      baseURL: id === "qwen" && cred?.region === "custom" ? cred.baseURL : null,
+      baseURL: id === "qwen" ? (cred?.region === "custom" ? cred.baseURL : null) : COMPAT_PROVIDERS[id]?.custom ? (cred?.baseURL ?? null) : null,
+      needsBase: !!COMPAT_PROVIDERS[id]?.custom, // the person gives the server's address
+      keyOptional: !!COMPAT_PROVIDERS[id]?.custom,
+      defaultBase: COMPAT_PROVIDERS[id]?.defaultBase ?? null,
+      keyPage: COMPAT_PROVIDERS[id]?.keys ?? null,
       models: e.models ? e.models.map((m) => ({ ...m })) : null,
       modelsError: e.modelsError,
       model: e.model,
@@ -357,9 +389,22 @@ export function createRegistry({
       if (id === "chatgpt") {
         return await listChatGPTModels({ baseURL: chatgptBase, cred: await freshCredential(cred.oauth), fetch: doFetch });
       }
-      if (id === "opencode") {
+      if (COMPAT_PROVIDERS[id]) {
+        const c = COMPAT_PROVIDERS[id];
         try {
-          const models = await listOpenCodeModels({ modelsURL: opencodeModels, apiKey: cred.apiKey, fetch: doFetch });
+          const models = await listCompatModels({ baseURL: c.custom ? cred.baseURL : (endpoints[id] ?? c.base), apiKey: cred.apiKey, label: SHORT[id], strip: c.strip, fetch: doFetch });
+          return { models, modelsError: null };
+        } catch (err) {
+          if (isAuthError(err)) throw err;
+          // A local server that does not answer is a mistake to report, not a model list to type in.
+          if (c.custom && !(err.status > 0)) throw new HttpError(400, `${scrub(err.message, cred.apiKey)}. Is the server running at ${cred.baseURL}?`);
+          return { models: null, modelsError: `${err.message}. Type a model id instead.` };
+        }
+      }
+      if (id === "opencode" || id === "opencodego") {
+        try {
+          const go = id === "opencodego";
+          const models = await listOpenCodeModels({ modelsURL: go ? opencodeGoModels : opencodeModels, apiKey: cred.apiKey, label: SHORT[id], fetch: doFetch });
           return { models, modelsError: null };
         } catch (err) {
           if (isAuthError(err)) throw err;
@@ -392,7 +437,9 @@ export function createRegistry({
   async function setKey(id, body) {
     requireProvider(id);
     if (OAUTH.has(id)) throw new HttpError(400, `${SHORT[id]} has no API key: sign in instead (POST /api/providers/${id}/login)`);
-    const apiKey = typeof body?.apiKey === "string" ? body.apiKey.trim() : "";
+    const custom = !!COMPAT_PROVIDERS[id]?.custom;
+    let apiKey = typeof body?.apiKey === "string" ? body.apiKey.trim() : "";
+    if (!apiKey && custom) apiKey = LOCAL_KEY;
     if (!apiKey) throw new HttpError(400, "apiKey is required");
     if (/\s/.test(apiKey)) throw new HttpError(400, "apiKey must not contain spaces");
     if (body.remember !== undefined && typeof body.remember !== "boolean") throw new HttpError(400, "remember must be true or false");
@@ -409,8 +456,10 @@ export function createRegistry({
           throw new HttpError(400, `region must be one of: ${QWEN_REGIONS.map((r) => r.id).join(", ")}`);
         }
       }
+    } else if (custom) {
+      baseURL = validateBaseURL(body.baseURL || COMPAT_PROVIDERS[id].defaultBase);
     } else if (body.baseURL) {
-      throw new HttpError(400, "baseURL is only used for qwen");
+      throw new HttpError(400, "baseURL is only used for qwen and a local model");
     } else if (body.region) {
       throw new HttpError(400, "region is only used for qwen");
     }
@@ -424,8 +473,8 @@ export function createRegistry({
     e.models = models;
     e.modelsError = modelsError;
     const saved = readKeysFile();
-    if (body.remember === true) {
-      saved[id] = id === "qwen" ? { apiKey, region, ...(baseURL ? { baseURL } : {}) } : { apiKey };
+    if (body.remember !== false) { // saved unless the caller says remember: false
+      saved[id] = id === "qwen" ? { apiKey, region, ...(baseURL ? { baseURL } : {}) } : custom ? { apiKey, baseURL } : { apiKey };
       writeKeysFile(saved);
       e.file = { ...cred };
     } else if (saved[id] || e.file) {
@@ -434,7 +483,7 @@ export function createRegistry({
       writeKeysFile(saved);
       e.file = null;
     }
-    logger.log?.(`[providers] ${id}: key added from the page${body.remember ? " and saved to .keys.json" : ""}`);
+    logger.log?.(`[providers] ${id}: key added from the page${body.remember !== false ? " and saved to .keys.json" : ""}`);
     return info(id);
   }
 
@@ -504,9 +553,20 @@ export function createRegistry({
 
   // A provider for one generation, bound to what is active right now.
   function acquire() {
-    const { id, model } = active;
-    const cred = id ? current(id) : null;
-    if (!cred) return fallbackProvider;
+    return (active.id && acquireWith(active.id, active.model)) || fallbackProvider;
+  }
+
+  // A provider bound to this provider id and model, or null when it has no key
+  // (the planning model uses this; it is not the active provider).
+  const limiters = new Map();
+  const limiterOf = (id) => limiters.get(id) ?? limiters.set(id, createLimiter(concurrency)).get(id);
+  function acquireWith(id, model) {
+    const p = bind(id, model);
+    return p ? limitProvider(p, limiterOf(id)) : null;
+  }
+  function bind(id, model) {
+    const cred = PROVIDER_IDS.includes(id) && model ? current(id) : null;
+    if (!cred) return null;
     if (id === "anthropic") {
       return {
         name: "anthropic",
@@ -526,18 +586,28 @@ export function createRegistry({
         refresh: () => freshCredential(oauth, { force: true }),
         loadCodexPrompt,
         quirks: chatgptQuirks,
+        retries,
         fetch: doFetch,
       });
     }
     const e = entries[id];
+    if (COMPAT_PROVIDERS[id]) {
+      const c = COMPAT_PROVIDERS[id];
+      return createOpenAICompatProvider({
+        id, label: SHORT[id], baseURL: c.custom ? cred.baseURL : (endpoints[id] ?? c.base), apiKey: cred.apiKey, model,
+        maxOutput: e.models?.find((m) => m.id === model)?.maxOutput, retries, fetch: doFetch,
+      });
+    }
     return createOpenAICompatProvider({
       id,
       label: SHORT[id],
-      baseURL: id === "qwen" ? qwenBase(cred) : id === "opencode" ? opencodeBase : (endpoints.deepseek ?? DEEPSEEK_BASE),
+      baseURL: id === "qwen" ? qwenBase(cred) : id === "opencode" ? opencodeBase : id === "opencodego" ? opencodeGoBase : (endpoints.deepseek ?? DEEPSEEK_BASE),
+      headers: id === "opencode" || id === "opencodego" ? opencodeHeaders : {},
       apiKey: cred.apiKey,
       model,
       maxOutput: e.models?.find((m) => m.id === model)?.maxOutput,
       noThinkingField: e.noThinkingField,
+      retries,
       fetch: doFetch,
     });
   }
@@ -572,6 +642,7 @@ export function createRegistry({
     activate,
     activeConfig,
     acquire,
+    acquireWith,
     close: () => login.close(),
     fallback: fallbackProvider,
   };

@@ -9,8 +9,9 @@
 //   PORT          listen port (default 4317)
 //   HOST          listen address (default 127.0.0.1)
 //   PC_MODE       generation mode for new chats: fanout (default) or single
-//   PC_MAX_CARDS  cards one chat's answer may create, 1 to 6 (default 4)
+//   PC_MAX_CARDS  cards one chat's answer may create, 1 to 10 (default 6)
 //   PC_MODEL      model for the Anthropic provider (default claude-opus-5-5)
+//   PC_COALESCE_MS  merge streamed text into one event per this many ms (default 40; 0: off)
 //   PC_DATA_DIR   where chats and settings are kept across restarts (default
 //                 .data in this folder: log.jsonl and config.json, never a key);
 //                 a relative path is taken from this folder; "off" keeps
@@ -34,7 +35,7 @@ process.on("uncaughtException", (err) => console.error("[parallel-chat] uncaught
 const port = Number(process.env.PORT) || 4317;
 const host = process.env.HOST || "127.0.0.1";
 const mode = process.env.PC_MODE === "single" ? "single" : "fanout";
-const maxCards = Number(process.env.PC_MAX_CARDS) || 4;
+const maxCards = Number(process.env.PC_MAX_CARDS) || 6;
 const here = path.dirname(fileURLToPath(import.meta.url));
 const dataSetting = process.env.PC_DATA_DIR?.trim();
 const dataDir = dataSetting === "off" ? null : path.resolve(here, dataSetting || ".data");
@@ -48,6 +49,7 @@ const app = await startServer({
   mode,
   maxCards,
   dataDir,
+  coalesceMs: process.env.PC_COALESCE_MS === undefined ? 40 : Number(process.env.PC_COALESCE_MS) || 0,
 });
 const config = app.engine.getConfig();
 console.log(

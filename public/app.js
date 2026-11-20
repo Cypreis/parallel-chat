@@ -13,6 +13,8 @@ Object.defineProperty(HTMLElement.prototype, 'title', {
 for (const el of document.querySelectorAll('[title]')) { el.dataset.tip = el.getAttribute('title'); el.removeAttribute('title'); }
 installTooltips();
 import { plainQuote, renderMarkdown, firstSentence, truncate, formatChars, STATUS_LABEL, EDGE_VERB } from '/lib.mjs';
+import { hydrateEmbeds } from '/embeds.mjs';
+import { createSavedView } from '/saved.mjs';
 import { readFileAsDoc, formatBytes, downloadText, safeFilename } from '/files.mjs';
 
 /* ------------------------------------------------------------------ state */
@@ -27,6 +29,9 @@ const chatIdOf = HAS_FLOW && typeof R.chatOf === 'function' ? R.chatOf : (st, id
 let state = createState();
 const nodeChat = (id) => chatIdOf(state, id);
 
+function loadQPin() {
+  try { return localStorage.getItem('pc.qpin') === '1'; } catch { return false; }
+}
 function loadView() {
   try { const v = localStorage.getItem('pc.view'); return v === 'strip' ? 'strip' : v === 'flow' && HAS_FLOW ? 'flow' : 'fit'; } catch { return 'fit'; }
 }
@@ -61,6 +66,7 @@ function saveView(v) {
 const ui = {
   view: loadView(),
   activeId: null,        // chat (question id) on screen
+  shownCards: new Set(), // cards and questions already drawn once: coming back to a chat does not replay their entrance
   pendingActivate: null, // chat to open once its question node arrives
   selected: new Set(),
   shell: loadShell(),    // shell-style editing keys in text boxes
@@ -85,7 +91,7 @@ const ui = {
   sideOpen: loadSide(),  // docked sidebar open (true), collapsed (false), or default (null)
   overlay: false,        // sidebar shown as an overlay
   boardW: 0,
-  qOpen: false,          // question bubble expanded
+  qOpen: loadQPin(),     // the question stays open (the pin), saved
   prov: { status: 'idle', active: null, list: [], sel: null, filter: '', ui: {} }, // providers (Model section)
   connected: true,
   config: { provider: '', model: '', mode: 'single', maxCards: null },
@@ -120,7 +126,7 @@ const $ = (id) => document.getElementById(id);
 const els = {
   shell: $('shell'), side: $('side'), scrim: $('scrim'), main: $('app-main'), board: $('board'), chats: $('chats'), empty: $('empty'), examples: $('examples'), notices: $('notices'),
   sideToggle: $('side-toggle'), newChat: $('new-chat'), menuBtn: $('menu-btn'), chatList: $('chat-list'),
-  qStep: $('q-step'), qStepText: $('q-step-text'), qPrev: $('q-prev'), qNext: $('q-next'), branchPrompt: $('branch-prompt'), branchInput: $('branch-input'), branchSend: $('branch-send'), topNo: $('top-no'), topMeta: $('top-meta'), qRow: $('qrow'), qBubble: $('q-bubble'), viewSeg: $('view-seg'),
+  qStep: $('q-step'), qStepText: $('q-step-text'), qPrev: $('q-prev'), qNext: $('q-next'), branchPrompt: $('branch-prompt'), branchInput: $('branch-input'), branchSend: $('branch-send'), topNo: $('top-no'), topMeta: $('top-meta'), qRow: $('qrow'), qBubble: $('q-bubble'), qPin: $('q-pin'), viewSeg: $('view-seg'),
   decBtn: $('dec-btn'), decCount: $('dec-count'), settingsBtn: $('settings-btn'), helpBtn: $('help-btn'),
   drawer: $('drawer'), drawerTitle: $('drawer-title'), drawerClose: $('drawer-close'), paneDec: $('pane-dec'), panePeek: $('pane-peek'),
   decisions: $('decisions'), decForm: $('dec-form'), decInput: $('dec-input'), decErr: $('dec-err'),
@@ -136,7 +142,7 @@ const els = {
   keyhint: $('keyhint'), slashMenu: $('slash-menu'), rsearch: $('rsearch'), shellSwitch: $('shell-switch'),
   askPop: $('ask-pop'), dock: $('dock'), modePick: $('mode-pick'), modeTiles: $('mode-tiles'), modeInline: $('mode-inline'),
   chatSearch: $('chat-search'), newGroup: $('new-group'), topName: $('top-name'),
-  filesBtn: $('files-btn'), filesCount: $('files-count'), notesBtn: $('notes-btn'), notesCount: $('notes-count'),
+  savedBtn: $('saved-btn'), savedCount: $('saved-count'), savedSide: $('saved-side'), savedSideCount: $('saved-side-count'), savedRoot: $('saved-view'), filesBtn: $('files-btn'), filesCount: $('files-count'), notesBtn: $('notes-btn'), notesCount: $('notes-count'),
   paneNotes: $('pane-notes'), paneFiles: $('pane-files'), chatNote: $('chat-note'), chatNoteState: $('chat-note-state'), cardNotes: $('card-notes'), cardNotesN: $('card-notes-n'),
   fileList: $('file-list'), filesErr: $('files-err'), filesAdd: $('files-add'), fileInput: $('file-input'),
   attachList: $('attach-list'), attachBtn: $('attach-btn'), dropZone: $('drop-zone'), dropSub: $('drop-sub'),
@@ -145,7 +151,7 @@ const els = {
   decSrc: $('dec-src'), decFormH: $('dec-form-h'), decAffects: $('dec-affects'), decAffList: $('dec-aff-list'), decAffAll: $('dec-aff-all'), decAffNone: $('dec-aff-none'),
   decSubmit: $('dec-submit'), decCancel: $('dec-cancel'),
   popAsk: $('pop-ask'), popPin: $('pop-pin'), popNote: $('pop-note'),
-  lenBtn: $('len-btn'), lenLabel: $('len-label'), thinkBtn: $('think-btn'), thinkLabel: $('think-label'),
+  lenBtn: $('len-btn'), lenLabel: $('len-label'), modelBtn: $('model-btn'), modelLabel: $('model-label'), plannerNote: $('planner-note'), plannerUi: $('planner-ui'),
 };
 
 const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
@@ -201,6 +207,10 @@ function h(tag, attrs, ...kids) {
 const ICONS = {
   stop: '<rect x="7" y="7" width="10" height="10" rx="2"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
+  bookmark: '<path d="M7 4h10a1 1 0 0 1 1 1v15l-6-4-6 4V5a1 1 0 0 1 1-1z"/>',
+  grip: '<circle cx="9" cy="7" r="1"/><circle cx="15" cy="7" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="9" cy="17" r="1"/><circle cx="15" cy="17" r="1"/>',
+  folder: '<path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/>',
+  chat: '<path d="M5 5h14a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 19 16h-8l-4.5 3.5V16H5a1.5 1.5 0 0 1-1.5-1.5v-8A1.5 1.5 0 0 1 5 5z"/>',
   link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
   check: '<path d="M5 12.5l4.5 4.5L19 7.5"/>',
   arrowUp: '<path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/>',
@@ -285,6 +295,7 @@ function setMarkdown(el, text, fade) {
   const prevN = el._n || 0;
   el._src = text;
   el.innerHTML = renderMarkdown(text);
+  if (el.querySelector('.embed[data-src]')) hydrateEmbeds(el);
   const n = el.children.length;
   if (fade && n > prevN && !reducedMotion.matches) {
     for (let i = prevN; i < n; i++) el.children[i].animate([{ opacity: 0 }, { opacity: 1 }], { duration: 120, easing: 'ease-out' });
@@ -427,6 +438,7 @@ function render() {
     renderDrawer();
     renderBar();
     renderSettings();
+    renderSavedUi();
     updatePills();
     runFlight();
     if (ui.flight && !ui.flight.q === false) schedule();
@@ -569,7 +581,8 @@ function fitGrow(c) {
   const body = c.body || '';
   let len = body.length + threadOf(state, c.id).reduce((a, m) => a + (m.body || '').length * 0.5, 0);
   if (/^\s*\|.*\|\s*$/m.test(body)) len *= 1.5; // tables want width
-  if (/```|\$\$/.test(body)) len *= 1.2; // code and display math too
+  if (/```(mermaid|chart|vega|svg)/i.test(body)) len = Math.max(len * 1.6, 1400); // diagrams and charts need room
+  else if (/```|\$\$/.test(body)) len *= 1.2; // code and display math too
   const g = Math.sqrt(Math.max(len, 120) / 700);
   return Math.round(Math.min(2.4, Math.max(0.6, g)) * 5) / 5;
 }
@@ -588,6 +601,25 @@ function resetBox(v) {
   v.flAnim?.cancel(); v.flAnim = null;
 }
 
+// A chat that left the screen: its elements go, its state (scroll, current card) stays.
+function releaseChat(cv, chat) {
+  cv.built = false;
+  cv.row.replaceChildren(cv.sizer);
+  cv.linkMap?.clear();
+  cv.famMap?.clear();
+  cv.linkSvg?.replaceChildren();
+  cv.breaks = null;
+  cv.flowBoard = null;
+  cv.view = null;
+  for (const q of chat.questions) {
+    qViews.delete(q.id);
+    for (const c of cardsOrdered(state, q.id)) {
+      cardViews.delete(c.id);
+      for (const m of threadOf(state, c.id)) msgViews.delete(m.id);
+    }
+  }
+}
+
 function createQCard(id) {
   const v = { id, q: true, mode: null };
   v.text = h('p', { class: 'q-text' });
@@ -604,14 +636,26 @@ function renderChats(ts) {
   const flow = view === 'flow';
   const strip = view === 'strip';
   const inner = Math.max(200, els.board.clientWidth - 24);
+  const waitNew = !!ui.pendingActivate && !state.nodes[ui.pendingActivate] && !flow;
   staggerN = 0;
   for (const chat of ts) {
     seenChats.add(chat.id);
     let cv = chatViews.get(chat.id);
     if (!cv) { cv = createChat(chat.id); chatViews.set(chat.id, cv); }
     chatEls.push(cv.el);
-    const active = chat.id === ui.activeId && !ui.start;
+    // a new question in Fit/Strip opens a new chat: until it arrives, the previous
+    // chat's board and its animations are not shown as if they were the answer
+    const active = chat.id === ui.activeId && !ui.start && !waitNew;
     setHidden(cv.el, !active && !cv.el.classList.contains('leaving'));
+    // Only the chat on screen keeps its cards in the page. The others are not drawn, and their card
+    // elements are dropped (a long history is thousands of elements that every frame would otherwise
+    // check); opening one builds it again from the state.
+    if (!active && !cv.el.classList.contains('leaving')) {
+      if (cv.built) releaseChat(cv, chat);
+      cv.shown = false;
+      continue;
+    }
+    cv.built = true;
     const wasShown = cv.shown;
 
     const cards = flow ? chatCards(chat.id) : orderedCards(chat.id);
@@ -636,7 +680,8 @@ function renderChats(ts) {
     for (const c of cards) {
       seenCards.add(c.id);
       let v = cardViews.get(c.id);
-      if (!v) { v = createCard(c.id); cardViews.set(c.id, v); v.fresh = active && ui.live; }
+      if (!v) { v = createCard(c.id); cardViews.set(c.id, v); v.fresh = active && ui.live && !ui.shownCards.has(c.id); }
+      ui.shownCards.add(c.id);
       if (v.mode !== view) { resetBox(v); v.mode = view; }
       cardEls.push(v.el);
       if (strip) {
@@ -655,7 +700,8 @@ function renderChats(ts) {
       for (const q of chat.questions) {
         seenQ.add(q.id);
         let qv = qViews.get(q.id);
-        if (!qv) { qv = createQCard(q.id); qViews.set(q.id, qv); qv.fresh = active && ui.live; }
+        if (!qv) { qv = createQCard(q.id); qViews.set(q.id, qv); qv.fresh = active && ui.live && !ui.shownCards.has(q.id); }
+        ui.shownCards.add(q.id);
         if (qv.mode !== view) { resetBox(qv); qv.mode = view; }
         setText(qv.text, q.body || '');
         items.push({ kind: 'q', id: q.id, v: qv });
@@ -690,7 +736,7 @@ function renderChats(ts) {
     if (active) refreshEdges(cv.row);
   }
   reconcile(els.chats, chatEls);
-  for (const id of cardViews.keys()) if (!seenCards.has(id)) { cardViews.delete(id); ui.selected.delete(id); }
+  for (const id of cardViews.keys()) if (!seenCards.has(id)) { cardViews.delete(id); if (!state.nodes[id]) ui.selected.delete(id); } // a selection outlives its chat's elements
   for (const id of qViews.keys()) if (!seenQ.has(id) && flow) qViews.delete(id);
   for (const id of chatViews.keys()) if (!seenChats.has(id)) chatViews.delete(id);
 
@@ -828,8 +874,9 @@ function naturalHeight(v) {
 function tierBounds(t, H) {
   if (t === 0) return [Math.min(260, H), Math.min(260, H)];
   if (t === 1) return [Math.min(260, H), Math.max(Math.min(260, H), Math.round(H * 0.7))];
-  if (t === 2) return [Math.min(320, H), H];
-  return [H, H];
+  // wide tiers are as tall as their text, up to the board: a card never holds blank space
+  if (t === 2) return [Math.min(180, H), H];
+  return [Math.min(180, H), H];
 }
 
 function layoutFlow(cv, items, wasShown) {
@@ -1096,6 +1143,7 @@ function updateFlowLinks(cv, items, placed, totalW, H, freshIds, animateMoves, g
     if (o?.cardId && placed.has(o.cardId)) wanted.set('o:' + it.id, { from: o.cardId, to: it.id, kind: 'origin', quote: o.quote });
   }
   for (const e of state.edges) {
+    if (e.rel !== 'elaborates') continue; // only sub-card links are drawn
     if (!placed.has(e.from) || !placed.has(e.to)) continue;
     const a = state.nodes[e.from], b = state.nodes[e.to];
     if (a?.origin?.cardId === e.to || b?.origin?.cardId === e.from) continue; // already drawn as an origin link
@@ -1306,7 +1354,8 @@ function createCard(id) {
   v.wBtn = h('button', { class: 'qbtn w-btn', type: 'button', title: 'Card width: click to cycle (r)', onclick: () => cycleWidth(id) });
   v.noteBtn = h('button', { class: 'qbtn', type: 'button', title: 'Your private note on this card (the model never sees it)', 'aria-label': 'Note', 'aria-expanded': 'false', onclick: () => toggleNote(v) }, icon('note'));
   v.pinBtn = h('button', { class: 'qbtn', type: 'button', title: 'Pin a decision from this card: a rule the model will follow', 'aria-label': 'Pin a decision', onclick: () => { const c = state.nodes[id]; openPinDraft(firstSentence(c?.summary || c?.body || ''), id); } }, icon('pin'));
-  v.head = h('header', { class: 'card-head' }, v.title, v.status, h('span', { class: 'head-actions' }, v.stop, v.copyBtn, v.noteBtn, v.pinBtn, v.wBtn, v.ctxBtn, v.checkWrap));
+  v.saveBtn = h('button', { class: 'qbtn', type: 'button', title: 'Save this card', 'aria-label': 'Save this card', 'aria-pressed': 'false', onclick: () => toggleSave(id) }, icon('bookmark'));
+  v.head = h('header', { class: 'card-head' }, v.title, v.status, h('span', { class: 'head-actions' }, v.stop, v.saveBtn, v.copyBtn, v.noteBtn, v.pinBtn, v.wBtn, v.ctxBtn, v.checkWrap));
 
   v.staleText = h('button', { class: 'stale-link', type: 'button', title: 'Show the decision', onclick: () => openDrawer({ kind: 'decisions' }, { toggle: false }) });
   v.refresh = h('button', { class: 'btn small bordered', type: 'button', title: 'Rewrite this card so it follows the decision', onclick: () => refreshCard(id) }, icon('refresh'), h('span', { text: 'Refresh' }));
@@ -1401,6 +1450,12 @@ function updateCard(v, c, curId, flow) {
   setClass(v.el, 'cur', curId === c.id);
 
   setHidden(v.stop, st !== 'streaming');
+  const isSaved = !!(state.saved && state.saved[c.id]);
+  if (v.saveBtn._on !== isSaved) {
+    v.saveBtn._on = isSaved; setClass(v.saveBtn, 'on', isSaved); // blue when saved, but only shown on hover like the other card buttons
+     setAttr(v.saveBtn, 'aria-pressed', String(isSaved));
+    v.saveBtn.dataset.tip = isSaved ? 'Saved: click to remove' : 'Save this card'; v.saveBtn.setAttribute('aria-label', v.saveBtn.dataset.tip);
+  }
   const open = ui.ctxOpen.has(c.id);
   if (v.ctxBtn._on !== open) { v.ctxBtn._on = open; v.ctxBtn.setAttribute('aria-expanded', String(open)); setClass(v.ctxBtn, 'keep', open); setHidden(v.ctx, !open); }
   const sel = ui.selected.has(c.id);
@@ -1600,6 +1655,7 @@ async function sendReply(v, forced) {
 
 function setActive(chatId) {
   if (!chatId || !state.nodes[chatId]) return;
+  closeSaved(); // opening a chat leaves the saved board
   const wasStart = ui.start;
   ui.start = false;
   ui.overlay = false;
@@ -1725,7 +1781,7 @@ function renderTop(ts) {
     const n = chatCards(chat.id).length;
     const lq0 = chat.questions[chat.questions.length - 1];
     rollText(els.topMeta, n === 0 && lq0?.status === 'streaming' ? '\u00b7 planning' : '\u00b7 ' + n + ' card' + (n === 1 ? '' : 's'));
-    if (els.qRow._chat !== chat.id) { els.qRow._chat = chat.id; ui.qOpen = false; }
+    if (els.qRow._chat !== chat.id) els.qRow._chat = chat.id;
     const qs = chat.questions;
     const qi = Math.max(0, Math.min(qs.length - 1, ui.qIndex.has(chat.id) ? ui.qIndex.get(chat.id) : qs.length - 1));
     const q = qs[qi];
@@ -1733,6 +1789,10 @@ function renderTop(ts) {
     if (els.qBubble.title !== (q?.body || '')) els.qBubble.title = q?.body || '';
     setClass(els.qBubble, 'open', ui.qOpen);
     setAttr(els.qBubble, 'aria-expanded', String(ui.qOpen));
+    setAttr(els.qPin, 'aria-pressed', String(ui.qOpen));
+    setClass(els.qPin, 'on', ui.qOpen);
+    const pinTip = ui.qOpen ? 'Let the question fold away' : 'Keep the question open';
+    if (els.qPin.dataset.tip !== pinTip) { els.qPin.dataset.tip = pinTip; els.qPin.setAttribute('aria-label', pinTip); }
     setHidden(els.qStep, qs.length < 2);
     setText(els.qStepText, (qi + 1) + ' of ' + qs.length);
     els.qPrev.disabled = qi <= 0; els.qNext.disabled = qi >= qs.length - 1;
@@ -1819,6 +1879,7 @@ function toggleSide() {
 }
 
 function newChat() {
+  closeSaved();
   ui.userStart = true;
   ui.start = true; ui.overlay = false;
   schedule();
@@ -1841,6 +1902,7 @@ function renderSideList(ts) {
   if (ui.activeId && !ui.start) {
     for (const c of chatCards(ui.activeId)) {
       for (const e of edgesOf(state, c.id)) {
+        if (e.rel !== 'elaborates') continue;
         const other = state.nodes[e.from === c.id ? e.to : e.from];
         if (other && nodeChat(other.id) !== ui.activeId) linked.add(nodeChat(other.id));
       }
@@ -2059,9 +2121,17 @@ function openMenu(anchor, items) {
   closeMenu();
   if (again) return;
   const btns = [];
+  const inputs = [];
   const kids = items.map((it) => {
     if (it.sep) return h('div', { class: 'menu-sep', role: 'separator' });
     if (it.heading) return h('div', { class: 'menu-h', text: it.heading });
+    if (it.input) {
+      const inp = h('input', { type: 'text', class: 'menu-input', value: it.input.value || '', placeholder: it.input.placeholder || '', maxlength: '60', autocomplete: 'off', spellcheck: 'false', 'aria-label': it.input.placeholder || 'Name' });
+      const go = () => { const v = inp.value.trim(); if (!v) { inp.focus(); return; } closeMenu(); it.input.onSubmit(v); };
+      inp.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter') { e.preventDefault(); go(); } else if (e.key === 'Escape') { e.preventDefault(); closeMenu(); } });
+      inputs.push(inp);
+      return h('div', { class: 'menu-input-row' }, inp, h('button', { class: 'btn small primary', type: 'button', text: it.input.button || 'OK', onclick: go }));
+    }
     const b = h('button', { class: 'menu-item' + (it.danger ? ' danger' : ''), type: 'button', role: it.checked !== undefined ? 'menuitemradio' : 'menuitem', disabled: it.disabled || null },
       it.icon ? icon(it.icon) : h('span', { class: 'ic' }), h('span', { class: 'mi-l', text: it.label }), it.checked ? icon('check', 'mi-check') : null);
     if (it.checked !== undefined) b.setAttribute('aria-checked', String(!!it.checked));
@@ -2085,7 +2155,8 @@ function openMenu(anchor, items) {
   m.style.top = (r.bottom + 4 + hh <= window.innerHeight ? r.bottom + 4 : Math.max(8, r.top - hh - 4)) + 'px';
   anchor.setAttribute('aria-expanded', 'true');
   menuEl = m;
-  btns[0]?.focus({ preventScroll: true });
+  (inputs[0] || btns[0])?.focus({ preventScroll: true });
+  if (inputs[0]?.value) inputs[0].select();
 }
 document.addEventListener('mousedown', (e) => { if (menuEl && !menuEl.contains(e.target) && !menuEl._anchor.contains(e.target)) closeMenu(); });
 window.addEventListener('resize', closeMenu);
@@ -2639,7 +2710,7 @@ function renderBar() {
 
 /* ---- Model section (providers, keys, models) */
 
-const PROV_ORDER = ['anthropic', 'chatgpt', 'opencode', 'deepseek', 'qwen'];
+const PROV_ORDER = ['anthropic', 'chatgpt', 'openai', 'gemini', 'xai', 'mistral', 'groq', 'openrouter', 'together', 'huggingface', 'opencode', 'opencodego', 'deepseek', 'qwen', 'local'];
 const provLabel = (p) => p.label || p.id;
 
 // Provider calls always send JSON and never notify: errors show inline in the dialog.
@@ -2658,7 +2729,7 @@ async function pApi(method, path, body) {
   }
 }
 
-const provUi = (id) => (ui.prov.ui[id] ||= { error: '', busy: false, confirmRemove: false, model: null, other: '', region: null, baseURL: '', remember: false, autoTried: false });
+const provUi = (id) => (ui.prov.ui[id] ||= { error: '', busy: false, confirmRemove: false, model: null, other: '', region: null, baseURL: '', autoTried: false });
 const provById = (id) => ui.prov.list.find((p) => p.id === id) || null;
 
 async function loadProviders() {
@@ -2676,7 +2747,103 @@ async function loadProviders() {
   }
   renderSettings();
   renderModelUi();
+  renderPlannerUi();
   watchSignIn();
+}
+
+/* Planning model: optional, off until set. A cheaper, faster model plans
+   fan-out answers (which cards, what each covers); the answer model writes them. */
+
+const PLANNER_SUGGEST = { anthropic: 'claude-haiku-5-5', chatgpt: 'gpt-5.4-mini' };
+const plannerDraft = { provider: null, model: '', thinking: 'low', error: '', busy: false, other: false, fetching: null };
+
+function renderPlannerUi({ force = false } = {}) {
+  const box = els.plannerUi;
+  if (!box || (!force && box.contains(document.activeElement))) return;
+  const cur = ui.config.planner || null;
+  const d = plannerDraft;
+  if (d.provider && !provById(d.provider)?.hasKey && d.provider !== cur?.provider) d.provider = cur?.provider || ''; // its key was removed
+  if (d.provider === null) { d.provider = cur?.provider || ''; d.model = cur?.model || ''; d.thinking = cur?.thinking || 'low'; d.other = false; }
+  const prov = provById(d.provider);
+  const provSel = h('select', { id: 'planner-prov', 'data-fk': 'planner-prov', disabled: d.busy, onchange: () => {
+    d.provider = provSel.value; d.error = '';
+    d.model = d.provider === cur?.provider ? cur.model : (PLANNER_SUGGEST[d.provider] || '');
+    d.other = false;
+    d.thinking = d.provider === cur?.provider ? cur.thinking : (d.thinking || 'low');
+    renderPlannerUi({ force: true });
+    // a dropdown is the setting: Off turns it off at once; a provider starts on its small model (or the first listed)
+    if (!d.provider || d.model) savePlanner();
+  } },
+  h('option', { value: '', text: 'Off: the answer model plans too', selected: !d.provider }),
+  // every provider: one that is not connected yet cannot be picked until it is (connect it above)
+  ui.prov.list.map((p) => h('option', { value: p.id, text: provLabel(p) + (p.hasKey ? '' : ' \u00b7 not connected'), disabled: !p.hasKey && d.provider !== p.id, selected: d.provider === p.id })));
+  const kids = [h('div', { class: 'set-row' }, h('label', { for: 'planner-prov', text: 'Planning model' }), provSel)];
+  if (d.provider) {
+    // The provider's model list (fetched once if Settings has not loaded it
+    // yet), the suggested small model first; "Other" opens a text box.
+    if (prov?.hasKey && prov.models == null && !prov.modelsError && !d.fetching?.[d.provider]) {
+      const id = d.provider;
+      (d.fetching ||= {})[id] = true; // once per provider: a failure must not loop
+      pApi('POST', `/api/providers/${encodeURIComponent(id)}/models`).then((r) => {
+        if (r.ok && r.data.provider) applyProvider(r.data.provider);
+        renderPlannerUi({ force: true });
+      });
+    }
+    const models = [...(prov?.models || [])];
+    const suggest = PLANNER_SUGGEST[d.provider];
+    if (suggest && !models.some((m) => m.id === suggest)) models.unshift({ id: suggest, label: suggest });
+    models.sort((a, b) => (b.id === suggest) - (a.id === suggest));
+    const listed = models.some((m) => m.id === d.model);
+    if (!d.other && d.model && !listed) d.other = true; // a saved id that is not in the list
+    if (!d.model && models.length) {
+      d.model = models[0].id;
+      // a provider chosen before its list was there: it starts on its first model, saved
+      if (!d.busy && !d.autoSaved?.[d.provider]) { (d.autoSaved ||= {})[d.provider] = true; queueMicrotask(savePlanner); }
+    }
+    const loading = prov && prov.models == null && !prov.modelsError;
+    const modelSel = h('select', { id: 'planner-model', 'data-fk': 'planner-model', 'aria-label': 'Planning model', disabled: d.busy || loading, onchange: () => {
+      d.other = modelSel.value === '\u0000other';
+      if (!d.other) d.model = modelSel.value;
+      else d.model = '';
+      renderPlannerUi({ force: true });
+      if (!d.other) savePlanner();
+    } },
+    loading ? h('option', { text: 'Loading models…', selected: true }) : null,
+    models.map((m) => h('option', { value: m.id, text: (m.label && m.label !== m.id ? m.label + ' (' + m.id + ')' : m.id) + (m.id === suggest ? ' · suggested' : ''), selected: !d.other && d.model === m.id })),
+    h('option', { value: '\u0000other', text: 'Other model id…', selected: d.other }));
+    const fields = [modelSel];
+    if (d.other) {
+      const model = h('input', { type: 'text', id: 'planner-model-id', 'data-fk': 'planner-model-id', value: d.model, placeholder: 'Model id', autocomplete: 'off', spellcheck: 'false', disabled: d.busy });
+      model.addEventListener('input', () => { d.model = model.value; });
+      model.addEventListener('change', () => { if (d.model.trim()) savePlanner(); }); // on Enter or leaving the box
+      model.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); model.blur(); } });
+      fields.push(model);
+    }
+    const think = h('select', { 'aria-label': 'Planning model thinking level', disabled: d.busy, onchange: () => { d.thinking = think.value; if (d.model.trim()) savePlanner(); } },
+      THINKING.map((t) => h('option', { value: t.id, text: 'Thinking: ' + t.label, selected: d.thinking === t.id })));
+    fields.push(think);
+    kids.push(h('div', { class: 'planner-fields' }, fields));
+    if (prov?.modelsError) kids.push(h('p', { class: 'muted set-note small', text: prov.modelsError }));
+  }
+  const status = d.busy ? 'Saving…' : cur
+    ? (provById(cur.provider)?.hasKey ? `On: ${provLabel(provById(cur.provider) || { id: cur.provider })} · ${cur.model} plans, thinking ${THINKING_LABEL[cur.thinking] || cur.thinking}.` : `${cur.provider} has no key now, so the answer model plans.`)
+    : 'Off.';
+  if (cur || d.busy) kids.push(h('p', { class: 'muted small', text: status }));
+  if (d.error) kids.push(h('p', { class: 'field-err', role: 'alert', text: d.error }));
+  kids.push(h('p', { class: 'muted set-note', text: 'Optional. In fan-out generation, a small fast model (Claude Haiku 5.5, GPT-5.4 Mini…) decides which cards to make, and the answer model writes them, so cards appear sooner. Single generation does not use it.' }));
+  box.replaceChildren(...kids);
+}
+
+async function savePlanner() {
+  const d = plannerDraft;
+  d.busy = true; d.error = '';
+  renderPlannerUi({ force: true });
+  const body = { planner: d.provider ? { provider: d.provider, model: d.model.trim(), thinking: d.thinking } : null };
+  const r = await pApi('POST', '/api/config', body);
+  d.busy = false;
+  if (r.ok) { ui.config = { ...ui.config, ...r.data }; d.provider = null; toast(body.planner ? 'Planning model set' : 'Planning model off'); }
+  else d.error = r.error;
+  renderPlannerUi({ force: true });
 }
 
 /* ChatGPT sign-in: the server waits for the redirect; the page polls until it lands. */
@@ -2696,21 +2863,21 @@ function watchSignIn() {
       const old = provById(p.id);
       if (p.auth !== 'oauth' || (old && signInShape(old) === signInShape(p))) continue;
       applyProvider(p); changed = true;
-      if (p.hasKey && !old?.hasKey) { const st = provUi(p.id); st.autoTried = !!p.models || !!p.modelsError; st.error = ''; }
+      if (p.hasKey && !old?.hasKey) { const st = provUi(p.id); st.autoTried = !!p.models || !!p.modelsError; st.error = ''; await autoActivate(p); }
     }
     if (changed) renderModelUi();
     if (!signInPending()) { clearInterval(signInTimer); signInTimer = null; }
   }, 1500);
 }
 
-async function startSignIn(p, { remember }) {
+async function startSignIn(p) {
   const st = provUi(p.id);
   // Open the tab inside the click, so it is not blocked; point it once the server answers.
   let tab = null;
   try { tab = window.open('', '_blank'); } catch { tab = null; }
   st.busy = true; st.error = '';
   renderModelUi({ keepFocus: false });
-  const r = await pApi('POST', `/api/providers/${encodeURIComponent(p.id)}/login`, { remember: !!remember });
+  const r = await pApi('POST', `/api/providers/${encodeURIComponent(p.id)}/login`, {});
   st.busy = false;
   if (r.ok && r.data.provider) {
     applyProvider(r.data.provider);
@@ -2732,7 +2899,7 @@ async function finishSignIn(p, url) {
   renderModelUi({ keepFocus: false });
   const r = await pApi('POST', `/api/providers/${encodeURIComponent(p.id)}/login/complete`, { url });
   st.busy = false;
-  if (r.ok && r.data.provider) { applyProvider(r.data.provider); st.paste = ''; st.autoTried = false; }
+  if (r.ok && r.data.provider) { applyProvider(r.data.provider); st.paste = ''; st.autoTried = false; await autoActivate(r.data.provider); }
   else st.error = r.error;
   renderModelUi();
   watchSignIn();
@@ -2765,13 +2932,10 @@ function signInPanel(p, st, panel, err) {
       h('div', { class: 'set-actions' }, h('button', { class: 'btn', type: 'button', 'data-fk': 'paste-go', text: st.busy ? 'Checking' : 'Finish sign-in', disabled: st.busy, onclick: go })), err);
     return panel;
   }
-  const remember = h('input', { type: 'checkbox', id: 'rem-' + p.id, 'data-fk': 'remember', checked: st.remember, disabled: st.busy });
-  remember.addEventListener('change', () => { st.remember = remember.checked; });
   panel.append(
     h('p', { class: 'set-note', text: 'Use the models in your ChatGPT plan (Plus, Pro, Business…) with no API key. Requests count toward your plan’s limits, the same way Codex does.' }),
-    h('label', { class: 'check-row', for: 'rem-' + p.id }, remember, h('span', { text: 'Stay signed in on this computer' })),
-    h('p', { class: 'muted set-note small', text: 'Saves the sign-in to .keys.json in the app folder (git-ignored). Otherwise you are signed out when the server stops.' }),
-    h('div', { class: 'set-actions' }, h('button', { class: 'btn primary', type: 'button', 'data-fk': 'signin', text: st.busy ? 'Starting' : 'Sign in with ChatGPT', disabled: st.busy, onclick: () => startSignIn(p, { remember: remember.checked }) })));
+    h('p', { class: 'muted set-note small', text: 'The sign-in is kept on this computer (.keys.json in the app folder, git-ignored) until you sign out.' }),
+    h('div', { class: 'set-actions' }, h('button', { class: 'btn primary', type: 'button', 'data-fk': 'signin', text: st.busy ? 'Starting' : 'Sign in with ChatGPT', disabled: st.busy, onclick: () => startSignIn(p) })));
   if (login.error && !st.error) panel.append(h('p', { class: 'field-err', role: 'alert', text: login.error }));
   panel.append(err);
   return panel;
@@ -2798,9 +2962,10 @@ function selectProvider(id) {
 
 async function connectKey(p, fields) {
   const st = provUi(p.id);
-  const body = { apiKey: fields.key };
+  const body = {};
+  if (fields.key) body.apiKey = fields.key;
   if (p.regions) { body.region = fields.region; if (fields.region === 'custom') body.baseURL = fields.baseURL; }
-  if (fields.remember) body.remember = true;
+  if (p.needsBase) body.baseURL = fields.baseURL || p.defaultBase;
   st.busy = true; st.error = '';
   fields.clear(); // the key leaves the field as soon as the request is built
   fields.key = '';
@@ -2808,7 +2973,7 @@ async function connectKey(p, fields) {
   const r = await pApi('POST', `/api/providers/${encodeURIComponent(p.id)}/key`, body);
   body.apiKey = '';
   st.busy = false;
-  if (r.ok && r.data.provider) { applyProvider(r.data.provider); st.error = ''; st.autoTried = true; }
+  if (r.ok && r.data.provider) { applyProvider(r.data.provider); st.error = ''; st.autoTried = true; await autoActivate(r.data.provider); }
   else st.error = r.error;
   renderModelUi();
 }
@@ -2830,10 +2995,20 @@ async function fetchModels(p) {
   renderModelUi();
   const r = await pApi('POST', `/api/providers/${encodeURIComponent(p.id)}/models`);
   st.listBusy = false;
-  if (r.ok && r.data.provider) applyProvider(r.data.provider); else st.error = r.error;
+  if (r.ok && r.data.provider) { applyProvider(r.data.provider); await autoActivate(r.data.provider); } else st.error = r.error;
   renderModelUi();
 }
 
+// Nothing is in use yet and a provider just connected: start on its best-known
+// model, so connecting is all it takes. (Switching later is one click on a model.)
+const DEFAULT_MODEL = { anthropic: 'claude-opus-5-5', chatgpt: 'gpt-5.5' };
+async function autoActivate(p) {
+  if (!p?.hasKey || ui.prov.active?.provider) return;
+  const models = Array.isArray(p.models) ? p.models : [];
+  const want = DEFAULT_MODEL[p.id];
+  const model = (want && (models.some((m) => m.id === want) || !models.length) ? want : null) || models[0]?.id || null;
+  if (model) await useModel(p, model);
+}
 async function useModel(p, model) {
   const st = provUi(p.id);
   st.busy = true; st.error = '';
@@ -2859,7 +3034,7 @@ function modelRows(p, st, listEl) {
     const ctx = ctxLabel(m.contextWindow);
     return h('button', {
       type: 'button', role: 'radio', 'aria-checked': String(on), class: 'model-row' + (on ? ' on' : ''),
-      onclick: () => { st.model = m.id; st.other = ''; modelRows(p, st, listEl); const other = ui.prov.otherEl; if (other) other.value = ''; syncUse(p, st); },
+      onclick: () => { st.model = m.id; st.other = ''; useModel(p, m.id); },
     },
       h('span', { class: 'mr-main' }, m.label ? [h('span', { text: m.label }), h('span', { class: 'mr-id', text: m.id })] : h('span', { class: 'mr-id plain', text: m.id })),
       ctx ? h('span', { class: 'mr-ctx', text: ctx }) : null);
@@ -2871,6 +3046,7 @@ function syncUse(p, st) {
   if (!b) return;
   const model = (st.other || '').trim() || st.model || p.model || (ui.prov.active?.provider === p.id ? ui.prov.active.model : null);
   b.disabled = st.busy || (p.needsKey && !model);
+  b.hidden = !(st.other || '').trim(); // only a typed id needs its own button
   b._model = model;
 }
 
@@ -2902,6 +3078,7 @@ function renderModelUi({ keepFocus = true } = {}) {
   box.replaceChildren(...kids);
 
   if (focusKey) box.querySelector(`[data-fk="${focusKey}"]`)?.focus();
+  renderPlannerUi(); // its provider choices follow what is connected here, without closing Settings
 }
 
 function providerPanel(p) {
@@ -2915,10 +3092,19 @@ function providerPanel(p) {
   if (!p.hasKey) {
     // key entry: the value lives only in this input until Connect is pressed
     const keyId = 'key-' + p.id;
-    const keyInput = h('input', { type: 'password', id: keyId, 'data-fk': 'key', autocomplete: 'off', spellcheck: 'false', autocapitalize: 'off', placeholder: 'Paste your API key', disabled: st.busy });
-    panel.append(h('label', { class: 'field-label', for: keyId, text: 'API key' }), keyInput);
-
+    const keyInput = h('input', { type: 'password', id: keyId, 'data-fk': 'key', autocomplete: 'off', spellcheck: 'false', autocapitalize: 'off', placeholder: p.keyOptional ? 'Only if the server asks for one' : 'Paste your API key', disabled: st.busy });
     let regionSel = null, baseInput = null;
+    if (p.needsBase) {
+      // a local model server: its address first (Ollama, LM Studio, llama.cpp…), the key is optional
+      st.baseURL ||= p.defaultBase || '';
+      baseInput = h('input', { type: 'text', id: 'base-' + p.id, 'data-fk': 'base', value: st.baseURL, placeholder: p.defaultBase || 'http://localhost:11434/v1', autocomplete: 'off', spellcheck: 'false', disabled: st.busy });
+      baseInput.addEventListener('input', () => { st.baseURL = baseInput.value; });
+      panel.append(h('label', { class: 'field-label', for: 'base-' + p.id, text: 'Server address (OpenAI-compatible)' }), baseInput,
+        h('p', { class: 'muted set-note small', text: 'Ollama: http://localhost:11434/v1 · LM Studio: http://localhost:1234/v1 · llama.cpp: http://localhost:8080/v1' }));
+    }
+    panel.append(h('label', { class: 'field-label', for: keyId, text: p.keyOptional ? 'API key (optional)' : 'API key' }), keyInput);
+    if (p.keyPage) panel.append(h('p', { class: 'muted set-note small' }, 'Get a key at ', h('a', { href: 'https://' + p.keyPage, target: '_blank', rel: 'noopener noreferrer', text: p.keyPage })));
+
     if (p.regions) {
       st.region ||= p.region && p.region !== 'custom' ? p.region : (p.regions[0]?.id || 'intl');
       regionSel = h('select', { id: 'region-' + p.id, 'data-fk': 'region', disabled: st.busy, onchange: () => { st.region = regionSel.value; renderModelUi(); } },
@@ -2930,15 +3116,12 @@ function providerPanel(p) {
         panel.append(h('label', { class: 'field-label', for: 'base-' + p.id, text: 'Base URL' }), baseInput);
       }
     }
-    const remember = h('input', { type: 'checkbox', id: 'rem-' + p.id, 'data-fk': 'remember', checked: st.remember, disabled: st.busy });
-    remember.addEventListener('change', () => { st.remember = remember.checked; });
-    panel.append(h('label', { class: 'check-row', for: 'rem-' + p.id }, remember, h('span', { text: 'Remember on this computer' })),
-      h('p', { class: 'muted set-note small', text: 'Saved in .keys.json in the app folder (git-ignored). Otherwise the key is forgotten when the server stops.' }));
+    panel.append(h('p', { class: 'muted set-note small', text: p.id === 'opencodego' ? 'Your OpenCode Console key (Go subscription). Saved on this computer in .keys.json (git-ignored).' : 'Saved on this computer in .keys.json (git-ignored) until you remove it.' }));
 
     const go = () => {
       const key = keyInput.value.trim();
-      if (!key) { st.error = 'Paste your API key first.'; renderModelUi(); return; }
-      const fields = { key, region: regionSel ? regionSel.value : null, baseURL: baseInput ? baseInput.value.trim() : '', remember: remember.checked, clear: () => { keyInput.value = ''; } };
+      if (!key && !p.keyOptional) { st.error = 'Paste your API key first.'; renderModelUi(); return; }
+      const fields = { key, region: regionSel ? regionSel.value : null, baseURL: baseInput ? baseInput.value.trim() : '', clear: () => { keyInput.value = ''; } };
       connectKey(p, fields);
     };
     const connect = h('button', { class: 'btn primary', type: 'button', 'data-fk': 'connect', text: st.busy ? 'Checking' : 'Connect', disabled: st.busy, onclick: go });
@@ -2983,7 +3166,7 @@ function providerPanel(p) {
   panel.append(otherInput);
 
   const isActive2 = ui.prov.active?.provider === p.id;
-  const use = h('button', { class: 'btn primary', type: 'button', 'data-fk': 'use', text: 'Use this model', onclick: () => { if (use._model) useModel(p, use._model); } });
+  const use = h('button', { class: 'btn primary', type: 'button', 'data-fk': 'use', text: 'Use this model id', onclick: () => { if (use._model) useModel(p, use._model); } });
   ui.prov.useBtn = use;
   syncUse(p, st);
   panel.append(h('div', { class: 'set-actions' }, use, isActive2 ? h('span', { class: 'active-mark', text: `active · ${ui.prov.active.model || ''}` }) : null), err);
@@ -3012,15 +3195,24 @@ function renderSettings() {
   const lenTip = 'Answer length: ' + (LENGTH_LABEL[length] || 'Auto') + ' (L)';
   if (els.lenBtn.title !== lenTip) els.lenBtn.title = lenTip;
   const thinking = ui.config.thinking || 'auto';
+  const modelName = provider && model ? model : provider || '';
+  const thinkNote = modelName && thinking !== 'auto' && THINKS_ON.has(provider) ? ' \u00b7 ' + (THINKING_LABEL[thinking] || thinking) : '';
+  setText(els.modelLabel, modelName ? modelName + thinkNote : 'Connect a model');
+  setClass(els.modelBtn, 'set', !!modelName);
+  const modelTip = (modelName ? 'Model: ' + provider + ' \u00b7 ' + model + (thinkNote ? ' \u00b7 thinking ' + (THINKING_LABEL[thinking] || thinking).toLowerCase() : '') : 'No model connected: click to add one') + ' (M)';
+  if (els.modelBtn.title !== modelTip) els.modelBtn.title = modelTip;
+  // a small note when a separate planning model is on
+  const pl = ui.config.planner;
+  const plannerText = pl ? 'Planner: ' + pl.model : '';
+  setText(els.plannerNote, plannerText);
+  setHidden(els.plannerNote, !pl);
+  const plannerTip = pl ? `A separate model plans fan-out answers: ${provLabel(provById(pl.provider) || { id: pl.provider })} \u00b7 ${pl.model} \u00b7 thinking ${(THINKING_LABEL[pl.thinking] || pl.thinking || '').toLowerCase()}` : '';
+  if (els.plannerNote.title !== plannerTip) els.plannerNote.title = plannerTip;
   for (const b of els.settings.querySelectorAll('[data-thinking]')) {
     const on = b.dataset.thinking === thinking;
     setClass(b, 'on', on);
     setAttr(b, 'aria-checked', String(on));
   }
-  setText(els.thinkLabel, THINKING_LABEL[thinking] || 'Auto');
-  setClass(els.thinkBtn, 'set', thinking !== 'auto');
-  const thinkTip = 'Thinking level: ' + (THINKING_LABEL[thinking] || 'Auto') + ' (T)';
-  if (els.thinkBtn.title !== thinkTip) els.thinkBtn.title = thinkTip;
   for (const b of els.maxSeg.children) {
     const on = Number(b.dataset.max) === Number(maxCards);
     setClass(b, 'on', on);
@@ -3134,7 +3326,10 @@ async function askQuestion(text) {
   const flight = startFlight(text);
   const body = cont ? { text, chatId: ui.activeId } : { text };
   if (docs.length) body.docs = docs;
+  const SENDING = '\u0000sending';
+  if (!cont) { ui.pendingActivate = SENDING; schedule(); } // the board stops showing the previous chat at once
   const r = await api('POST', '/api/ask', body);
+  if (ui.pendingActivate === SENDING) { ui.pendingActivate = null; schedule(); }
   if (r) {
     ui.attachments = ui.attachments.filter((a) => !sent.includes(a) && a.status !== 'error');
     renderAttachments();
@@ -3215,7 +3410,9 @@ els.sideToggle.addEventListener('click', toggleSide);
 els.menuBtn.addEventListener('click', toggleSide);
 els.scrim.addEventListener('click', () => { ui.overlay = false; schedule(); });
 els.newChat.addEventListener('click', newChat);
-els.qBubble.addEventListener('click', () => { ui.qOpen = !ui.qOpen; schedule(); });
+const togglePin = () => { ui.qOpen = !ui.qOpen; try { localStorage.setItem('pc.qpin', ui.qOpen ? '1' : '0'); } catch { /* not saved */ } schedule(); };
+els.qBubble.addEventListener('click', togglePin); // touch screens have no hover: a tap pins
+els.qPin.addEventListener('click', togglePin);
 for (const [b, d] of [[els.qPrev, -1], [els.qNext, 1]]) {
   b.addEventListener('click', () => {
     const qs = ui.chatById.get(ui.activeId)?.questions || [];
@@ -3226,7 +3423,7 @@ for (const [b, d] of [[els.qPrev, -1], [els.qNext, 1]]) {
 }
 
 // settings
-for (let i = 1; i <= 6; i++) {
+for (let i = 1; i <= 10; i++) {
   els.maxSeg.append(h('button', { type: 'button', role: 'radio', 'aria-checked': 'false', 'data-max': String(i), text: String(i), onclick: async () => {
     const c = await api('POST', '/api/config', { maxCards: i });
     if (c) { ui.config = { ...ui.config, ...c }; schedule(); }
@@ -3263,10 +3460,80 @@ async function setThinking(id) {
   if (c) { ui.config = { ...ui.config, ...c }; schedule(); toast('Thinking level: ' + THINKING_LABEL[id]); }
 }
 for (const b of els.settings.querySelectorAll('[data-thinking]')) b.addEventListener('click', () => setThinking(b.dataset.thinking));
-els.thinkBtn.addEventListener('click', () => openMenu(els.thinkBtn, [
-  { heading: 'Thinking level' },
-  ...THINKING.map((t) => ({ label: `${t.label} · ${t.note}`, checked: (ui.config.thinking || 'auto') === t.id, run: () => setThinking(t.id) })),
-]));
+// The model picker under the question box: every connected provider's models.
+// Hovering a model of a provider that has a thinking level opens that level's
+// choices beside it (picking one sets model and level together).
+const THINKS_ON = new Set(['anthropic', 'chatgpt']);
+function openModelMenu() {
+  const anchor = els.modelBtn;
+  const again = menuEl && menuEl._anchor === anchor;
+  closeMenu();
+  if (again) return;
+  const m = h('div', { class: 'menu popover model-menu', role: 'menu' });
+  const fly = h('div', { class: 'mm-fly popover', role: 'menu', hidden: true });
+  const rows = [];
+  const showFly = (row, p, model) => {
+    if (!THINKS_ON.has(p.id)) { fly.hidden = true; return; }
+    const cur = ui.config.thinking || 'auto';
+    const active = ui.prov.active?.provider === p.id && ui.prov.active.model === model;
+    fly.replaceChildren(h('div', { class: 'menu-h', text: 'Thinking level' }), ...THINKING.map((t) => h('button', {
+      class: 'menu-item', type: 'button', role: 'menuitemradio', 'aria-checked': String(active && cur === t.id),
+      onclick: async () => { closeMenu(); await setThinking(t.id); await useModel(p, model); },
+    }, h('span', { class: 'ic' }), h('span', { class: 'mi-l', text: t.label + ' \u00b7 ' + t.note }), active && cur === t.id ? icon('check', 'mi-check') : null)));
+    fly.hidden = false;
+    const r = row.getBoundingClientRect(), mr = m.getBoundingClientRect();
+    const w = fly.offsetWidth, hh = fly.offsetHeight;
+    const left = mr.left - w - 4 >= 8 ? mr.left - w - 4 : Math.min(mr.right + 4, window.innerWidth - w - 8);
+    fly.style.left = left + 'px';
+    fly.style.top = Math.max(8, Math.min(r.top, window.innerHeight - hh - 8)) + 'px';
+  };
+  for (const p of ui.prov.list.filter((x) => x.hasKey)) {
+    m.append(h('div', { class: 'menu-h', text: provLabel(p) }));
+    const models = Array.isArray(p.models) ? p.models : [];
+    const active = ui.prov.active?.provider === p.id ? ui.prov.active.model : null;
+    const list = models.slice(0, 40);
+    if (active && !models.some((x) => x.id === active)) list.unshift({ id: active });
+    for (const md of list) {
+      const on = active === md.id;
+      const row = h('button', { class: 'menu-item mm-row', type: 'button', role: 'menuitemradio', 'aria-checked': String(on), onclick: () => { closeMenu(); useModel(p, md.id); } },
+        h('span', { class: 'ic' }), h('span', { class: 'mi-l', text: md.label && md.label !== md.id ? md.label : md.id }), on ? icon('check', 'mi-check') : null, THINKS_ON.has(p.id) ? h('span', { class: 'mm-more', text: '\u203a' }) : null);
+      row.addEventListener('mouseenter', () => showFly(row, p, md.id));
+      row.addEventListener('focus', () => showFly(row, p, md.id));
+      rows.push(row);
+      m.append(row);
+    }
+    if (models.length > 40) m.append(h('button', { class: 'menu-item', type: 'button', onclick: () => { closeMenu(); ui.prov.sel = p.id; openSettings(); } }, h('span', { class: 'ic' }), h('span', { class: 'mi-l', text: `${models.length - 40} more in Settings\u2026` })));
+    if (!models.length && !list.length) m.append(h('button', { class: 'menu-item', type: 'button', onclick: () => { closeMenu(); ui.prov.sel = p.id; openSettings(); } }, h('span', { class: 'ic' }), h('span', { class: 'mi-l', text: 'Pick a model in Settings\u2026' })));
+  }
+  m.append(h('div', { class: 'menu-sep', role: 'separator' }), h('button', { class: 'menu-item', type: 'button', onclick: () => { closeMenu(); openSettings(); } }, h('span', { class: 'ic' }), h('span', { class: 'mi-l', text: 'Providers and keys\u2026' })));
+  m.addEventListener('mouseleave', (e) => { if (!fly.contains(e.relatedTarget)) fly.hidden = true; });
+  fly.addEventListener('mouseleave', (e) => { if (!m.contains(e.relatedTarget)) fly.hidden = true; });
+  m.append(fly);
+  m._anchor = anchor;
+  m.addEventListener('keydown', (e) => {
+    const i = rows.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown') { e.preventDefault(); rows[(i + 1) % rows.length]?.focus(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); rows[(i - 1 + rows.length) % rows.length]?.focus(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeMenu(); anchor.focus(); }
+  });
+  document.body.append(m);
+  const r = anchor.getBoundingClientRect(), w = m.offsetWidth, hh = m.offsetHeight;
+  m.style.left = Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8)) + 'px';
+  m.style.top = (r.top - hh - 6 >= 8 ? r.top - hh - 6 : Math.min(r.bottom + 6, Math.max(8, window.innerHeight - hh - 8))) + 'px';
+  anchor.setAttribute('aria-expanded', 'true');
+  menuEl = m;
+  (rows.find((x) => x.getAttribute('aria-checked') === 'true') || rows[0])?.focus({ preventScroll: true });
+}
+els.modelBtn.addEventListener('click', async () => {
+  if (ui.prov.status !== 'ready') await loadProviders();
+  if (!ui.prov.list.some((p) => p.hasKey)) { openSettings(); return; }
+  // lists not fetched yet (a key from .keys.json): fetch them once, quietly
+  await Promise.all(ui.prov.list.filter((p) => p.hasKey && p.models == null && !p.modelsError).map(async (p) => {
+    const r = await pApi('POST', `/api/providers/${encodeURIComponent(p.id)}/models`);
+    if (r.ok && r.data.provider) applyProvider(r.data.provider);
+  }));
+  openModelMenu();
+});
 for (const b of els.settings.querySelectorAll('[data-mode]')) {
   b.addEventListener('click', async () => {
     const c = await api('POST', '/api/config', { mode: b.dataset.mode });
@@ -3554,6 +3821,14 @@ document.addEventListener('click', async (e) => {
 const hist = createHistory();
 const seqHint = els.keyhint;
 
+// A toast with a link in it, kept a few seconds so there is time to click.
+function toastAction(msg, label, run) {
+  document.querySelectorAll('.toast.has-action').forEach((t) => t.remove());
+  const t = h('div', { class: 'toast has-action', role: 'status' }, h('span', { text: msg }), h('button', { class: 'toast-link', type: 'button', text: label, onclick: () => { t.remove(); run(); } }));
+  document.body.append(t);
+  anim(t, [{ opacity: 0, transform: 'translate(-50%, 8px)' }, { opacity: 1, transform: 'translate(-50%, 0)' }], { duration: 160 });
+  setTimeout(() => { t.remove(); }, 4500);
+}
 function toast(msg) {
   const t = h('div', { class: 'toast', role: 'status', text: msg });
   document.body.append(t);
@@ -3626,12 +3901,81 @@ function writeIn(forceNew) {
   if (forceNew && effView() === 'flow' && v) { v.forceNew = true; setHidden(v.newChip, false); }
   focusComposer(id);
 }
+/* ---- saved cards */
+
+const savedView = createSavedView({
+  root: els.savedRoot, h, icon, getState: () => state, nodeChat, chatNo, renderMarkdown, hydrateEmbeds, api, threadOf,
+  openCard: (id) => { closeSaved(); revealCard(id, { pulse: true }); },
+  onClose: () => closeSaved(),
+  pickFolder: (anchor, id) => openSaveMenu(anchor, id),
+  newFolder: (anchor) => askFolderName(anchor, '', 'New folder', async (name) => { await api('POST', '/api/folders', { name }); }),
+  folderMenu: (anchor, folderId) => {
+    const f = (state.folders || []).find((x) => x.id === folderId);
+    if (!f) return;
+    openMenu(anchor, [
+      { label: 'Rename folder', icon: 'edit', run: () => askFolderName(anchor, f.name, 'Folder name', (name) => api('PATCH', `/api/folders/${encodeURIComponent(folderId)}`, { name })) },
+      { label: 'Delete folder\u2026', icon: 'trash', danger: true, run: async () => {
+        const n = Object.values(state.saved || {}).filter((s) => s.folderId === folderId).length;
+        const ok = await confirmBox({ title: `Delete the folder “${f.name}”?`, text: n ? `Its ${n} saved card${n === 1 ? '' : 's'} stay saved, with no folder.` : 'It is empty.', ok: 'Delete folder', danger: true });
+        if (ok) { await api('DELETE', `/api/folders/${encodeURIComponent(folderId)}`); }
+      } },
+    ]);
+  },
+});
+function openSaved(filter) { savedView.open(filter); schedule(); }
+function closeSaved() { if (!savedView.isOpen) return; savedView.close(); schedule(); }
+// The bookmark opens a small menu: which folder (or none, or a new one). Saving is that choice.
+function toggleSave(id) {
+  openSaveMenu(cardViews.get(id)?.saveBtn || els.savedBtn, id);
+}
+async function saveTo(id, folderId) {
+  const was = !!(state.saved && state.saved[id]);
+  const folderName = folderId ? (state.folders || []).find((f) => f.id === folderId)?.name : '';
+  let r;
+  if (was) r = await api('PATCH', `/api/saved/${encodeURIComponent(id)}`, { folderId: folderId || null });
+  else {
+    // the card's size on the board is the size it first shows on the saved board
+    const el = cardViews.get(id)?.el;
+    const size = el && el.offsetWidth > 0 ? { w: el.offsetWidth, h: el.offsetHeight } : {};
+    r = await api('POST', `/api/cards/${encodeURIComponent(id)}/save`, { saved: true, ...(folderId ? { folderId } : {}), ...size });
+  }
+  if (!r) return;
+  toastAction(was ? (folderName ? `Moved to ${folderName}` : 'Moved out of its folder') : (folderName ? `Saved to ${folderName}` : 'Saved'), 'See all saved cards', () => openSaved(folderId || 'all'));
+}
+function openSaveMenu(anchor, id) {
+  const cur = state.saved && state.saved[id];
+  const folders = state.folders || [];
+  const items = [{ heading: cur ? 'Move to' : 'Save to' }, { label: 'No folder', icon: 'bookmark', checked: cur ? !cur.folderId : undefined, run: () => saveTo(id, null) }];
+  for (const f of folders) items.push({ label: f.name || 'Untitled folder', icon: 'folder', checked: cur ? cur.folderId === f.id : undefined, run: () => saveTo(id, f.id) });
+  items.push({ sep: true }, { input: { placeholder: 'New folder…', button: 'Create and save', onSubmit: async (name) => {
+    const r = await api('POST', '/api/folders', { name });
+    if (r?.folder) await saveTo(id, r.folder.id);
+  } } });
+  if (cur) items.push({ sep: true }, { label: 'Remove from saved', icon: 'trash', danger: true, run: async () => { if (await api('POST', `/api/cards/${encodeURIComponent(id)}/save`, { saved: false })) toast('Removed from saved'); } });
+  openMenu(anchor, items);
+}
+// a name typed in a small menu (new folder, rename)
+function askFolderName(anchor, value, placeholder, onSubmit) {
+  closeMenu();
+  openMenu(anchor, [{ input: { value, placeholder, button: value ? 'Rename' : 'Create', onSubmit } }]);
+}
+els.savedBtn.addEventListener('click', () => (savedView.isOpen ? closeSaved() : openSaved('all')));
+els.savedSide.addEventListener('click', () => openSaved('all'));
+function renderSavedUi() {
+  const n = savedView.count();
+  for (const [c, el] of [[els.savedCount, els.savedCount], [els.savedSideCount, els.savedSideCount]]) { setHidden(el, n === 0); setText(c, String(n)); }
+  setAttr(els.savedBtn, 'aria-expanded', String(savedView.isOpen));
+  setClass(els.savedBtn, 'on', savedView.isOpen);
+  setHidden(els.savedRoot, !savedView.isOpen);
+  savedView.render();
+}
+
 function closeTopLayer() {
+  if (savedView.isOpen && !ui.pop && !ui.palette && !menuEl) { closeSaved(); return true; }
   if (ui.palette) { closePalette(); return true; }
   if (menuEl) { closeMenu(); return true; }
   if (ui.pop === 'help') { ui.pop = null; schedule(); return true; }
   if (ui.pop === 'settings') { closeSettings(); return true; }
-  if (linksPop) { closeLinksPop(); return true; }
   if (branchTarget) { closeBranchPrompt(); return true; }
   if (previewHost.isOpen) { previewHost.hide(); return true; }
   if (ui.overlay) { ui.overlay = false; schedule(); return true; }
@@ -3688,7 +4032,9 @@ cmd({ id: 'decisions', title: 'Decisions: rules the model follows', group: 'View
 cmd({ id: 'files', title: 'Files the model reads in this chat', group: 'View', keys: ['f'], names: ['files', 'documents'], slash: 'files', when: inChatNow, run: () => openDrawer({ kind: 'files' }) });
 cmd({ id: 'notes', title: 'Notes on this chat (private)', group: 'View', keys: ['N'], names: ['notes'], slash: 'notes', when: inChatNow, run: () => openDrawer({ kind: 'notes' }) });
 cmd({ id: 'length', title: 'Answer length', group: 'Write', keys: ['L'], names: ['length', 'short', 'long'], slash: 'length', run: () => els.lenBtn.click() });
-cmd({ id: 'thinking', title: 'Thinking level', group: 'Write', keys: ['T'], names: ['thinking', 'effort', 'reasoning'], slash: 'thinking', run: () => els.thinkBtn.click() });
+cmd({ id: 'model', title: 'Choose model', group: 'Write', keys: ['M'], names: ['model', 'models'], slash: 'model', run: () => els.modelBtn.click() });
+cmd({ id: 'saved', title: 'Saved cards', group: 'Cards', keys: ['S'], names: ['saved', 'whiteboard', 'board'], slash: 'saved', run: () => (savedView.isOpen ? closeSaved() : openSaved('all')) });
+cmd({ id: 'thinking', title: 'Thinking level', group: 'Write', keys: ['T'], names: ['thinking', 'effort', 'reasoning'], slash: 'thinking', run: () => els.modelBtn.click() });
 for (const t of ['low', 'medium', 'high', 'max', 'auto']) cmd({ id: 'thinking.' + t, title: 'Thinking level: ' + t[0].toUpperCase() + t.slice(1), group: 'Write', keys: [], names: [t], hidden: true, run: () => setThinking(t) });
 for (const l of ['brief', 'medium', 'detailed', 'auto']) cmd({ id: 'length.' + l, title: 'Answer length: ' + l[0].toUpperCase() + l.slice(1), group: 'Write', keys: [], names: [l], hidden: true, run: () => setLength(l) });
 cmd({ id: 'attach',title: 'Attach files to the next question', group: 'Write', keys: ['A'], names: ['attach', 'upload'], slash: 'attach', run: () => { fileTarget = 'composer'; els.fileInput.click(); } });
@@ -3770,9 +4116,9 @@ function handleEscape(e, typing, t) {
   if (rs.active) { cancelRsearch(); return; }
   if (ui.pop === 'help') { ui.pop = null; schedule(); return; }
   if (ui.pop === 'settings') { closeSettings(); return; }
-  if (linksPop) { closeLinksPop(); return; }
   if (branchTarget) { closeBranchPrompt(); return; }
   if (typing) { t.blur(); return; }
+  if (savedView.isOpen) { closeSaved(); return; }
   if (previewHost.isOpen) { previewHost.hide(); return; }
   if (ui.pop) { ui.pop = null; schedule(); return; }
   if (ui.overlay) { ui.overlay = false; schedule(); return; }
@@ -3849,7 +4195,8 @@ function mainComposerKeys(e, name, ta) {
 }
 
 function updateStopBtn() {
-  const busy = !!ui.activeId && !ui.start && streamingIn(ui.activeId).length > 0;
+  // not busy while a just-sent question is on its way to its own new chat
+  const busy = !!ui.activeId && !ui.start && !ui.pendingActivate && streamingIn(ui.activeId).length > 0;
   const stop = busy && !els.askInput.value.trim();
   setClass(els.askSend, 'is-stop', stop);
   setAttr(els.askSend, 'aria-label', stop ? 'Stop generating' : 'Send question');

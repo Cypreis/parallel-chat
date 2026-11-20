@@ -4,13 +4,24 @@ import { networkInterfaces } from "node:os";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import zlib from "node:zlib";
+import { promisify } from "node:util";
 import { createEngine, HttpError, LENGTHS, MAX_CARDS, MODES, THINKING } from "./engine.mjs";
 import { createStore } from "./store.mjs";
-import { createLog } from "./log.mjs";
+import { createLog, jsonOf } from "./log.mjs";
 import { createRegistry } from "./providers/registry.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const KATEX_DIR = path.join(ROOT, "node_modules", "katex", "dist");
+const NM = path.join(ROOT, "node_modules");
+const VENDOR = {
+  katex: path.join(NM, "katex", "dist"),
+  mermaid: path.join(NM, "mermaid", "dist"),
+  vega: path.join(NM, "vega", "build"),
+  "vega-lite": path.join(NM, "vega-lite", "build"),
+  "vega-embed": path.join(NM, "vega-embed", "build"),
+  dompurify: path.join(NM, "dompurify", "dist"),
+};
+const SLOW_CLIENT_BYTES = 8 * 1024 * 1024; // unsent stream data after which a client is dropped
 const MAX_BODY = 32 * 1024 * 1024; // attached documents travel as text in the body
 
 const TYPES = {
@@ -58,6 +69,31 @@ function hostsFor(host, port) {
     if (loopback.includes(host)) for (const name of loopback) names.add(name);
   }
   return new Set([...names].map((n) => (n.includes(":") ? `[${n}]:${port}` : `${n}:${port}`).toLowerCase()));
+}
+
+const gzip = promisify(zlib.gzip);
+const brotli = promisify(zlib.brotliCompress);
+const COMPRESSIBLE = new Set([".html", ".htm", ".js", ".mjs", ".css", ".json", ".svg", ".txt", ".map"]);
+
+// Pick the best encoding the client accepts: br, then gzip.
+function pickEncoding(req) {
+  const a = String(req.headers["accept-encoding"] ?? "");
+  return /\bbr\b/.test(a) ? "br" : /\bgzip\b/.test(a) ? "gzip" : null;
+}
+
+// A JSON reply, gzipped when it is big and the client takes it (the whole
+// state of a long history is the largest thing the page ever fetches).
+async function sendJsonZ(req, res, status, body) {
+  const data = Buffer.from(JSON.stringify(body));
+  const headers = { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", vary: "accept-encoding" };
+  if (data.length > 4096 && /\bgzip\b/.test(String(req.headers["accept-encoding"] ?? ""))) {
+    const z = await gzip(data, { level: 3 });
+    res.writeHead(status, { ...headers, "content-encoding": "gzip", "content-length": z.length });
+    res.end(z);
+    return;
+  }
+  res.writeHead(status, { ...headers, "content-length": data.length });
+  res.end(data);
 }
 
 function sendJson(res, status, body) {
@@ -132,14 +168,16 @@ export async function startServer({
   // Without one: a registry with no keys, falling back to `provider`.
   registry = createRegistry({ fallback: provider, env: {}, keysFile: null, logger }),
   mode = "fanout",
-  maxCards = 4,
+  maxCards = 6,
   publicDir = path.join(ROOT, "public"),
   sharedDir = path.join(ROOT, "shared"),
   pingMs = 15000,
   // Persistence directory (log.jsonl, config.json); null keeps everything in memory.
   dataDir = null,
+  // Streamed text is merged for this many ms before it becomes an event (0: one event per piece).
+  coalesceMs = 0,
 } = {}) {
-  const log = createLog();
+  const log = createLog({ coalesceMs });
   const store = dataDir ? createStore({ dir: dataDir, logger }) : null;
   if (store) {
     const events = store.loadEvents();
@@ -173,6 +211,13 @@ export async function startServer({
     if (LENGTHS.includes(saved.length)) base.length = saved.length;
     if (THINKING.includes(saved.thinking)) base.thinking = saved.thinking;
     if (Object.keys(base).length) engine.setConfig(base);
+    if (saved.planner && typeof saved.planner === "object") {
+      try {
+        engine.setConfig({ planner: saved.planner });
+      } catch {
+        logger.log?.(`[store] the saved planning model (${saved.planner.provider}) has no key now; answers are planned by the answer model`);
+      }
+    }
     if (typeof saved.provider !== "string") return;
     try {
       engine.setConfig({ provider: saved.provider, model: typeof saved.model === "string" && saved.model ? saved.model : undefined });
@@ -199,7 +244,11 @@ export async function startServer({
     req.socket.setNoDelay?.(true);
     res.write(": connected\n\n");
     const write = (ev) => {
-      if (!res.writableEnded && !res.destroyed) res.write(`id: ${ev.seq}\ndata: ${JSON.stringify(ev)}\n\n`);
+      if (res.writableEnded || res.destroyed) return;
+      res.write(`id: ${ev.seq}\ndata: ${jsonOf(ev)}\n\n`);
+      // A client that is not reading (a stalled tab, a bad link) must not make the server hold everything for it:
+      // drop it, it reconnects with its last id and is caught up from the log.
+      if (res.writableLength > SLOW_CLIENT_BYTES) res.destroy();
     };
     // Replay and subscribe in the same tick, so nothing falls between them.
     for (const ev of log.since(since)) write(ev);
@@ -227,7 +276,7 @@ export async function startServer({
     let match;
     try {
       if (m === "GET" && p === "/api/events") return openStream(req, res, url);
-      if (m === "GET" && p === "/api/state") return sendJson(res, 200, log.state);
+      if (m === "GET" && p === "/api/state") return await sendJsonZ(req, res, 200, log.state);
       if (m === "GET" && p === "/api/config") return sendJson(res, 200, engine.getConfig());
       if (m === "POST" && p === "/api/config") {
         guard(req, { json: true });
@@ -246,6 +295,17 @@ export async function startServer({
         if (match[2] === "refresh") return sendJson(res, 202, engine.refresh(id));
         return sendJson(res, 200, engine.cancel(id));
       }
+      if (m === "POST" && (match = /^\/api\/cards\/([^/]+)\/save$/.exec(p))) return sendJson(res, 200, engine.saveCard(decodeId(match[1]), await readJson(req)));
+      if (m === "POST" && p === "/api/folders") return sendJson(res, 201, engine.addFolder(await readJson(req)));
+      if ((match = /^\/api\/folders\/([^/]+)$/.exec(p))) {
+        const id = decodeId(match[1]);
+        if (m === "PATCH") return sendJson(res, 200, engine.patchFolder(id, await readJson(req)));
+        if (m === "DELETE") {
+          req.resume();
+          return sendJson(res, 200, engine.removeFolder(id));
+        }
+      }
+      if (m === "PATCH" && (match = /^\/api\/saved\/([^/]+)$/.exec(p))) return sendJson(res, 200, engine.placeSaved(decodeId(match[1]), await readJson(req)));
       if (m === "POST" && p === "/api/broadcast") return sendJson(res, 202, engine.broadcast(await readJson(req)));
       if (m === "POST" && p === "/api/synthesize") return sendJson(res, 202, engine.synthesize(await readJson(req)));
       if (m === "POST" && p === "/api/decisions") return sendJson(res, 201, engine.pin(await readJson(req)));
@@ -370,7 +430,28 @@ export async function startServer({
 
   // ---------- static ----------
 
-  async function serveStatic(req, res, root, urlPath, { placeholder = false } = {}) {
+  // Files are read once and kept (with their compressed forms), keyed by
+  // path and revalidated by mtime and size: a changed file is read again.
+  // Requests answer 304 to a matching If-None-Match.
+  const assets = new Map(); // file -> { mtimeMs, size, etag, raw, enc: { br, gzip } }
+  async function asset(file) {
+    const info = await stat(file);
+    if (info.isDirectory()) return asset(path.join(file, "index.html"));
+    let a = assets.get(file);
+    if (!a || a.mtimeMs !== info.mtimeMs || a.size !== info.size) {
+      a = { mtimeMs: info.mtimeMs, size: info.size, etag: `W/"${info.size.toString(36)}-${Math.round(info.mtimeMs).toString(36)}"`, raw: await readFile(file), enc: {}, ext: path.extname(file).toLowerCase() };
+      assets.set(file, a);
+    }
+    return a;
+  }
+  function encoded(a, enc) {
+    // One compression per file and encoding, shared by requests that arrive together.
+    // Brotli at level 5 compresses a 5 MB library in well under a second and beats gzip.
+    a.enc[enc] ||= (enc === "br" ? brotli(a.raw, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 5, [zlib.constants.BROTLI_PARAM_SIZE_HINT]: a.raw.length } }) : gzip(a.raw, { level: 6 }));
+    return a.enc[enc];
+  }
+
+  async function serveStatic(req, res, root, urlPath, { placeholder = false, immutable = false } = {}) {
     const head = req.method === "HEAD";
     let rel;
     try {
@@ -383,15 +464,24 @@ export async function startServer({
     let file = path.resolve(base, rel.replace(/^[/\\]+/, ""));
     if (file !== base && !file.startsWith(base + path.sep)) return sendText(res, 404, "Not found\n", head);
     try {
-      const info = await stat(file);
-      if (info.isDirectory()) file = path.join(file, "index.html");
-      const data = await readFile(file);
-      res.writeHead(200, {
-        "content-type": TYPES[path.extname(file).toLowerCase()] ?? "application/octet-stream",
-        "content-length": data.length,
-        "cache-control": "no-cache",
-      });
-      res.end(head ? undefined : data);
+      const a = await asset(file);
+      const headers = {
+        "content-type": TYPES[a.ext] ?? "application/octet-stream",
+        etag: a.etag,
+        // Vendored libraries are pinned versions: kept for a day. The app's own files are revalidated (a 304 costs no body).
+        "cache-control": immutable ? "public, max-age=86400" : "no-cache",
+        vary: "accept-encoding",
+      };
+      if (req.headers["if-none-match"] === a.etag) {
+        res.writeHead(304, headers);
+        return res.end();
+      }
+      const enc = COMPRESSIBLE.has(a.ext) && a.raw.length > 1024 ? pickEncoding(req) : null;
+      const body = enc ? await encoded(a, enc) : a.raw;
+      if (enc) headers["content-encoding"] = enc;
+      headers["content-length"] = body.length;
+      res.writeHead(200, headers);
+      res.end(head ? undefined : body);
     } catch {
       if (placeholder) return sendText(res, 200, PLACEHOLDER, head);
       return sendText(res, 404, "Not found\n", head);
@@ -407,8 +497,10 @@ export async function startServer({
       return sendText(res, 405, "Method not allowed\n");
     }
     if (p === "/shared" || p.startsWith("/shared/")) return serveStatic(req, res, sharedDir, p.slice("/shared".length));
-    // KaTeX (math in cards), from npm install; without it math shows as source.
-    if (p.startsWith("/vendor/katex/")) return serveStatic(req, res, KATEX_DIR, p.slice("/vendor/katex".length));
+    // Libraries for cards (math, diagrams, charts, SVG), from npm install;
+    // without one, its content shows as source.
+    const vendor = /^\/vendor\/([a-z-]+)(\/.*)$/.exec(p);
+    if (vendor && VENDOR[vendor[1]]) return serveStatic(req, res, VENDOR[vendor[1]], vendor[2], { immutable: true });
     return serveStatic(req, res, publicDir, p, { placeholder: p === "/" });
   }
 
@@ -420,6 +512,11 @@ export async function startServer({
     });
   });
 
+  // Browsers reuse a connection for the page's many small requests: keep idle ones
+  // open longer than Node's 5 s default (the page's own /api/events stream is one long request anyway).
+  server.keepAliveTimeout = 65_000;
+  server.headersTimeout = 66_000;
+  server.maxRequestsPerSocket = 0;
   await new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, host, () => {

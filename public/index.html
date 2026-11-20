@@ -33,6 +33,10 @@
         <label class="sr-only" for="chat-search">Search chats</label>
         <input id="chat-search" type="search" placeholder="Search chats" autocomplete="off" spellcheck="false">
       </div>
+      <button id="saved-side" class="side-row saved-side" type="button" title="Saved cards (S)">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 4h10a1 1 0 0 1 1 1v15l-6-4-6 4V5a1 1 0 0 1 1-1z"/></svg>
+        <span class="lbl">Saved cards</span> <span id="saved-side-count" class="count lbl" hidden></span>
+      </button>
       <div class="side-label lbl side-label-row"><span>Chats</span>
         <button id="new-group" class="icon-btn small" type="button" title="New group" aria-label="New group">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/><path d="M12 11v5M9.5 13.5h5"/></svg>
@@ -74,6 +78,9 @@
           <button type="button" role="radio" aria-checked="false" data-w="4" title="One card fills the board">Full</button>
           <button type="button" role="radio" aria-checked="false" data-w="2" title="Current card centred, neighbours peeking">Focus</button>
         </div>
+        <button id="saved-btn" class="btn head-btn" type="button" aria-expanded="false" title="Your saved cards on a board (S)">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 4h10a1 1 0 0 1 1 1v15l-6-4-6 4V5a1 1 0 0 1 1-1z"/></svg>
+          <span class="hb-l">Saved</span> <span id="saved-count" class="count" hidden></span></button>
         <button id="files-btn" class="btn head-btn" type="button" aria-expanded="false" aria-controls="drawer" title="Files the model reads in this chat (f)">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11.5l-7.8 7.8a5 5 0 0 1-7.1-7.1l8.2-8.2a3.3 3.3 0 0 1 4.7 4.7l-8.2 8.2a1.7 1.7 0 0 1-2.4-2.4l7.5-7.5"/></svg>
           <span class="hb-l">Files</span> <span id="files-count" class="count" hidden></span></button>
@@ -92,9 +99,16 @@
         <span id="q-step-text"></span>
         <button id="q-next" class="icon-btn small" type="button" aria-label="Next question">&rsaquo;</button>
       </span>
-      <button id="q-bubble" class="bubble" type="button" aria-expanded="false" title=""></button></div>
+      <div class="q-wrap">
+        <button id="q-bubble" class="bubble" type="button" aria-expanded="false" title=""></button>
+        <button id="q-pin" class="icon-btn small q-pin" type="button" aria-pressed="false" aria-label="Keep the question open" title="Keep the question open">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 4h6l-1 6 3 3v1.5H7V13l3-3z"/><path d="M12 14.5V20"/></svg>
+        </button>
+      </div></div>
 
     <nav id="overview" class="overview" hidden aria-label="Cards in this chat"></nav>
+
+    <section id="saved-view" class="saved-view" hidden aria-label="Saved cards"></section>
 
     <div class="stage">
       <div id="notices" class="notices" aria-live="polite"></div>
@@ -182,7 +196,6 @@
         </button>
         <label class="sr-only" for="ask-input">Ask a new question</label>
         <textarea id="ask-input" rows="1" placeholder="Ask a new question"></textarea>
-        <button id="think-btn" class="len-btn think-btn" type="button" aria-haspopup="menu" aria-expanded="false" title="Thinking level (T)"><span id="think-label">Auto</span></button>
         <button id="len-btn" class="len-btn" type="button" aria-haspopup="menu" aria-expanded="false" title="Answer length (L)"><span id="len-label">Auto</span></button>
         <button id="ask-send" class="send-btn" type="submit" aria-label="Send question">
           <svg class="ic-up" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/></svg><svg class="ic-stop" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2.5" fill="currentColor"/></svg>
@@ -190,7 +203,12 @@
       </form>
       <div id="rsearch" class="rsearch" hidden aria-live="polite"></div>
       <div id="ask-err" class="field-err ask-err" hidden></div>
-      <p class="ask-note"><span id="ask-hint">Each question opens a new chat &middot; Enter to send &middot; Shift+Enter for a new line</span></p>
+      <div class="ask-note"><span id="ask-hint">Each question opens a new chat &middot; Enter to send &middot; Shift+Enter for a new line</span>
+        <span class="ask-extras">
+          <span id="planner-note" class="planner-note" hidden></span>
+          <button id="model-btn" class="model-btn" type="button" aria-haspopup="menu" aria-expanded="false" title="Model and thinking level (M)"><span id="model-label">Connect a model</span></button>
+        </span>
+      </div>
     </div>
 
     <section id="mode-pick" class="mode-pick" hidden aria-labelledby="mode-label">
@@ -239,6 +257,7 @@
           </div>
         </div>
         <p class="muted set-note">How long the model reasons before writing. Used by Anthropic (effort) and ChatGPT (reasoning effort; Max means High there). DeepSeek, Qwen and OpenCode ignore it.</p>
+        <div id="planner-ui" class="planner-ui"></div>
         <div class="set-row"><span>Maximum cards per answer</span><div id="max-seg" class="seg" role="radiogroup" aria-label="Maximum cards"></div></div>
         <div class="set-row"><span>Generation</span>
           <div class="seg" role="radiogroup" aria-label="Generation mode">

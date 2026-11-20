@@ -123,7 +123,6 @@ export function derivePlan(question, limit = 4) {
   const q = String(question ?? "").replace(/\s+/g, " ").trim();
   let parts = [];
   let shape = /^(compare|comparing)\b/i.test(q) ? "comparison" : "parallel";
-  let rel = "feeds";
 
   const numbered = [...q.matchAll(/(?:^|\s)\(?(\d{1,2})[.)]\s+/g)];
   // "Topic: a, b, and c" lists the parts after the colon.
@@ -142,11 +141,9 @@ export function derivePlan(question, limit = 4) {
       parts.push(q.slice(start, end));
     }
     shape = "steps";
-    rel = "depends_on";
   } else if (/\s(vs\.?|versus)\s/i.test(q)) {
     parts = splitParts(q.replace(/^(compare|comparing)\s+/i, ""), /\s(?:vs\.?|versus)\s/i);
     shape = "comparison";
-    rel = "alternative_to";
   } else if (listed.length >= 2) {
     parts = listed;
   } else {
@@ -186,7 +183,6 @@ export function derivePlan(question, limit = 4) {
       shape: "parallel",
       cards: facets.map(([title, intent], i) => ({ key: `c${i + 1}`, title, intent })),
       links: [
-        { from: "c1", to: "c2", rel: "feeds" },
         { from: "c3", to: "c2", rel: "elaborates" },
       ],
     };
@@ -195,9 +191,8 @@ export function derivePlan(question, limit = 4) {
   const cards = titles.map((title, i) => ({ key: `c${i + 1}`, title, intent: intents[i] }));
   const links = [];
   for (let i = 0; i + 1 < cards.length; i++) {
-    // depends_on and alternative_to point back at the earlier card; feeds points forward.
-    if (rel === "feeds") links.push({ from: cards[i].key, to: cards[i + 1].key, rel });
-    else links.push({ from: cards[i + 1].key, to: cards[i].key, rel });
+    // Only sub-card links exist now: the later card goes deeper into the earlier one.
+    links.push({ from: cards[i + 1].key, to: cards[i].key, rel: "elaborates" });
   }
   return { shape, cards, links };
 }

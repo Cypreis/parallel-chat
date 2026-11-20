@@ -27,6 +27,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import http from "node:http";
 import { ToolInputParseError } from "./errors.mjs";
 import { scrub, sseData, upstreamMessage } from "./openai-compat.mjs";
+import { withRetry } from "./flow.mjs";
 
 export const CHATGPT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 export const CHATGPT_ISSUER = "https://auth.openai.com";
@@ -553,6 +554,7 @@ export function createChatGPTProvider({
   loadCodexPrompt = async () => null,
   quirks = { needsCodexPrompt: false },
   effort = "medium",
+  retries = 0,
   fetch: doFetch = globalThis.fetch,
 }) {
   const url = baseURL.replace(/\/+$/, "") + "/responses";
@@ -586,12 +588,11 @@ export function createChatGPTProvider({
 
   async function post(body, cred, signal) {
     try {
-      return await doFetch(url, {
-        method: "POST",
-        headers: { "content-type": "application/json", ...headers(cred, sessionId, "text/event-stream") },
-        body: JSON.stringify(body),
-        signal,
-      });
+      const payload = JSON.stringify(body);
+      return await withRetry(
+        () => doFetch(url, { method: "POST", headers: { "content-type": "application/json", ...headers(cred, sessionId, "text/event-stream") }, body: payload, signal }),
+        { retries, signal },
+      );
     } catch (err) {
       if (signal?.aborted) throw abortError();
       throw new Error(`ChatGPT: could not connect: ${scrub(err?.cause?.message ?? err?.message ?? err, ...credentialSecrets(cred))}`);

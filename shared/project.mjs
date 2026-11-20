@@ -3,8 +3,10 @@
 // See protocol.md for the event table this implements.
 
 export function createState() {
-  return { seq: 0, nodes: {}, order: [], edges: [], decisions: [], chatMeta: {}, groups: [], notes: {}, docs: [] };
+  return { seq: 0, nodes: {}, order: [], edges: [], decisions: [], chatMeta: {}, groups: [], notes: {}, docs: [], saved: {}, folders: [] };
 }
+
+const validSize = (n) => Number.isFinite(n) && n >= 120 && n <= 4000;
 
 // Fields a chat.meta patch may set.
 export const CHAT_META_FIELDS = ["title", "groupId", "pinned"];
@@ -25,6 +27,8 @@ export function applyEvent(state, event) {
       state.groups = [];
       state.notes = {};
       state.docs = [];
+      state.saved = {};
+      state.folders = [];
       break;
     }
     case "node.open": {
@@ -128,6 +132,51 @@ export function applyEvent(state, event) {
       }
       break;
     }
+    // Saved cards: a card the person kept, with where it sits on the saved board
+    // (x, y; absent until it is moved) and whether its follow-ups show there.
+    case "card.save": {
+      if (!event.id) break;
+      if (event.saved === false) delete state.saved[event.id];
+      else if (state.nodes[event.id]?.kind === "card" && !state.saved[event.id]) {
+        // w and h: the card's size on the board when it was saved, the size it first shows on the saved board
+        const s = { ts: event.ts, follow: true };
+        if (typeof event.folderId === "string" && state.folders.some((f) => f.id === event.folderId)) s.folderId = event.folderId;
+        if (validSize(event.w)) s.w = Math.round(event.w);
+        if (validSize(event.h)) s.h = Math.round(event.h);
+        state.saved[event.id] = s;
+      }
+      break;
+    }
+    case "card.place": {
+      const s = state.saved[event.id];
+      if (!s || !event.patch) break;
+      const p = event.patch;
+      if (Number.isFinite(p.x) && Number.isFinite(p.y)) { s.x = Math.round(p.x); s.y = Math.round(p.y); }
+      if (typeof p.follow === "boolean") s.follow = p.follow;
+      if (p.folderId === null) delete s.folderId; // out of its folder
+      else if (typeof p.folderId === "string" && state.folders.some((f) => f.id === p.folderId)) s.folderId = p.folderId;
+      if (validSize(p.w)) s.w = Math.round(p.w);
+      if (p.h === null) delete s.h; // back to as tall as its text
+      else if (validSize(p.h)) s.h = Math.round(p.h);
+      break;
+    }
+    // Folders the person makes to sort saved cards. Deleting one keeps its cards, unfiled.
+    case "folder.add": {
+      const f = event.folder;
+      if (!f || !f.id || state.folders.some((x) => x.id === f.id)) break;
+      state.folders.push({ id: f.id, name: String(f.name ?? "") });
+      break;
+    }
+    case "folder.patch": {
+      const f = state.folders.find((x) => x.id === event.id);
+      if (f && typeof event.patch?.name === "string") f.name = event.patch.name;
+      break;
+    }
+    case "folder.remove": {
+      state.folders = state.folders.filter((f) => f.id !== event.id);
+      for (const s of Object.values(state.saved)) if (s.folderId === event.id) delete s.folderId;
+      break;
+    }
     case "note.set": {
       if (!event.targetId) break;
       const text = String(event.text ?? "");
@@ -193,6 +242,7 @@ function deleteChat(state, chatId) {
   for (const id of ids) {
     delete state.nodes[id];
     delete state.notes[id];
+    delete state.saved[id];
   }
   state.order = state.order.filter((id) => !ids.has(id));
   state.edges = state.edges.filter((e) => !ids.has(e.from) && !ids.has(e.to));

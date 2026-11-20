@@ -15,6 +15,7 @@
 // stop.content is Anthropic-shaped so the engine can append it unchanged.
 
 import { ToolInputParseError } from "./errors.mjs";
+import { withRetry } from "./flow.mjs";
 
 export const DEEPSEEK_BASE = "https://api.deepseek.com";
 export const QWEN_REGIONS = [
@@ -179,7 +180,7 @@ export async function* sseData(body, signal) {
  * @param {number} [o.maxOutput]  from the model list; max_tokens is min(16000, maxOutput)
  * @param {Set<string>} [o.noThinkingField]  qwen models that reject enable_thinking (shared, remembered)
  */
-export function createOpenAICompatProvider({ id, label, baseURL, apiKey, model, maxOutput, noThinkingField = new Set(), fetch: doFetch = globalThis.fetch }) {
+export function createOpenAICompatProvider({ id, label, baseURL, apiKey, model, maxOutput, noThinkingField = new Set(), headers = {}, retries = 0, fetch: doFetch = globalThis.fetch }) {
   const url = baseURL.replace(/\/+$/, "") + "/chat/completions";
   let generated = 0;
 
@@ -196,12 +197,11 @@ export function createOpenAICompatProvider({ id, label, baseURL, apiKey, model, 
 
   async function post(body, signal) {
     try {
-      return await doFetch(url, {
-        method: "POST",
-        headers: { "content-type": "application/json", accept: "text/event-stream", authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify(body),
-        signal,
-      });
+      const payload = JSON.stringify(body);
+      return await withRetry(
+        () => doFetch(url, { method: "POST", headers: { "content-type": "application/json", accept: "text/event-stream", authorization: `Bearer ${apiKey}`, ...headers }, body: payload, signal }),
+        { retries, signal },
+      );
     } catch (err) {
       if (signal?.aborted) throw abortError();
       throw new Error(`${label} API: could not connect: ${scrub(err?.cause?.message ?? err?.message ?? err, apiKey)}`);
@@ -393,6 +393,46 @@ export async function listDeepSeekModels({ baseURL = DEEPSEEK_BASE, apiKey, fetc
   return sortById(models);
 }
 
+// Other OpenAI-compatible services: the same chat/completions streaming as
+// DeepSeek, so one table is all each needs (base URL, where its key lives).
+// UNTESTED against the real services (no keys here); only against the local fake.
+// `strip` removes a prefix from listed model ids (Gemini lists "models/…").
+// `custom`: the person gives the base URL (a local model server), and a key is optional.
+export const COMPAT_PROVIDERS = {
+  openai: { label: "OpenAI", base: "https://api.openai.com/v1", env: ["OPENAI_API_KEY"], keys: "platform.openai.com/api-keys" },
+  gemini: { label: "Google Gemini", base: "https://generativelanguage.googleapis.com/v1beta/openai", env: ["GEMINI_API_KEY", "GOOGLE_API_KEY"], strip: "models/", keys: "aistudio.google.com/apikey" },
+  xai: { label: "xAI (Grok)", base: "https://api.x.ai/v1", env: ["XAI_API_KEY"], keys: "console.x.ai" },
+  mistral: { label: "Mistral", base: "https://api.mistral.ai/v1", env: ["MISTRAL_API_KEY"], keys: "console.mistral.ai/api-keys" },
+  groq: { label: "Groq", base: "https://api.groq.com/openai/v1", env: ["GROQ_API_KEY"], keys: "console.groq.com/keys" },
+  openrouter: { label: "OpenRouter", base: "https://openrouter.ai/api/v1", env: ["OPENROUTER_API_KEY"], keys: "openrouter.ai/keys" },
+  together: { label: "Together AI", base: "https://api.together.xyz/v1", env: ["TOGETHER_API_KEY"], keys: "api.together.ai/settings/api-keys" },
+  huggingface: { label: "Hugging Face", base: "https://router.huggingface.co/v1", env: ["HF_TOKEN", "HUGGINGFACE_API_KEY"], keys: "huggingface.co/settings/tokens" },
+  local: { label: "Local model (Ollama, LM Studio, llama.cpp…)", short: "Local", base: null, defaultBase: "http://localhost:11434/v1", env: [], envBase: "LOCAL_LLM_URL", custom: true },
+};
+
+// Not for chat: embeddings, speech, images, moderation.
+const NOT_CHAT = /embed|whisper|tts|transcri|dall-e|moderation|image|audio|realtime|rerank|guard|^sora|-vision-preview$/i;
+
+// GET {base}/models: an OpenAI-style { data: [...] }, or a bare array (Together).
+export async function listCompatModels({ baseURL, apiKey, label, strip = "", fetch: doFetch = globalThis.fetch }) {
+  const body = await getJSON(doFetch, baseURL.replace(/\/+$/, "") + "/models", apiKey, label);
+  const rows = Array.isArray(body) ? body : Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : null;
+  if (!rows) throw new Error(`${label} API: unexpected model list shape`);
+  const seen = new Set();
+  const models = [];
+  for (const m of rows) {
+    let id = typeof m === "string" ? m : m?.id ?? m?.name ?? m?.model;
+    if (typeof id !== "string" || !id) continue;
+    if (strip && id.startsWith(strip)) id = id.slice(strip.length);
+    if (seen.has(id) || NOT_CHAT.test(id)) continue;
+    if (m && typeof m === "object" && m.type && !/^(chat|language|text)$/i.test(String(m.type))) continue; // Together: type "image", "embedding"…
+    seen.add(id);
+    const nice = m && typeof m === "object" ? m.display_name ?? m.name : undefined;
+    models.push(cleanModel({ id, label: nice && nice !== id && nice !== m.id ? nice : undefined, contextWindow: m?.context_window ?? m?.context_length, maxOutput: m?.max_output_tokens }));
+  }
+  return sortById(models);
+}
+
 // OpenCode (opencode.ai, the Console / Zen gateway): one API key for many
 // models. Every text model is reachable through the OpenAI-compatible
 // chat/completions endpoint (the gateway translates), so this provider uses
@@ -400,16 +440,25 @@ export async function listDeepSeekModels({ baseURL = DEEPSEEK_BASE, apiKey, fetc
 // UNTESTED against the real gateway (no key here); only against the local fake.
 export const OPENCODE_BASE = "https://opencode.ai/inference/openai/v1";
 export const OPENCODE_MODELS_URL = "https://opencode.ai/inference/v1/models";
+// OpenCode Go (the subscription): the same gateway under /go.
+export const OPENCODE_GO_BASE = "https://opencode.ai/inference/go/openai/v1";
+export const OPENCODE_GO_MODELS_URL = "https://opencode.ai/inference/go/v1/models";
 
-// Not chat models, or free models the gateway serves only to the OpenCode app.
-const OPENCODE_SKIP = /(^|-)free$|image|banana|decision|^jev-/i;
+// Free models are served only to the OpenCode app itself.
+const OPENCODE_FREE = /(^|-)free$/i;
 
-// OpenCode: GET https://opencode.ai/inference/v1/models (OpenAI list shape).
-export async function listOpenCodeModels({ modelsURL = OPENCODE_MODELS_URL, apiKey, fetch: doFetch = globalThis.fetch }) {
-  const body = await getJSON(doFetch, modelsURL, apiKey, "OpenCode");
-  const models = openAIList(body);
-  if (!models) throw new Error("OpenCode API: unexpected model list shape");
-  return sortById(models.filter((m) => !OPENCODE_SKIP.test(m.id)));
+// OpenCode (Zen) and OpenCode Go: GET {models url}, an OpenAI-style list whose
+// entries also carry `type` (chat, image, embedding…) and `limit` { context,
+// output }. Only chat models are listed. Every chat model answers on the
+// OpenAI-compatible chat/completions endpoint (the gateway translates), so
+// that is what the provider calls whatever a model's own API is.
+export async function listOpenCodeModels({ modelsURL = OPENCODE_MODELS_URL, apiKey, label = "OpenCode", fetch: doFetch = globalThis.fetch }) {
+  const body = await getJSON(doFetch, modelsURL, apiKey, label);
+  if (!Array.isArray(body?.data)) throw new Error(`${label} API: unexpected model list shape`);
+  const models = body.data
+    .filter((m) => m && typeof m.id === "string" && (m.type === undefined || m.type === "chat") && !OPENCODE_FREE.test(m.id))
+    .map((m) => cleanModel({ id: m.id, label: m.name, contextWindow: m.limit?.context, maxOutput: m.limit?.output }));
+  return sortById(models);
 }
 
 // Qwen: GET {origin}/api/v1/models (paged); then GET {base}/models (OpenAI

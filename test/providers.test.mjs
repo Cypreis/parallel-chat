@@ -62,7 +62,7 @@ function brain(entry) {
         : { key: `c${i + 1}`, title, summary: `${title} summary.`, body: `${title} body: a < b, "q", back\\slash 🚀` },
     );
     return toolCallsSSE(
-      [...cards.map((input) => ({ name: "create_card", input })), { name: "link_cards", input: { from: "c1", to: "c2", rel: "feeds" } }],
+      [...cards.map((input) => ({ name: "create_card", input })), { name: "link_cards", input: { from: "c2", to: "c1", rel: "elaborates" } }],
       { reasoning: "planning the board" },
     );
   }
@@ -448,7 +448,9 @@ describe("provider registry and /api/providers", () => {
         ["deepseek", "key", true, false],
         ["qwen", "key", true, false],
         ["opencode", "key", true, false],
+        ["opencodego", "key", true, false],
         ["chatgpt", "oauth", true, false],
+        ...["openai", "gemini", "xai", "mistral", "groq", "openrouter", "together", "huggingface", "local"].map((id) => [id, "key", true, false]),
       ],
     );
     assert.equal((await api("POST", "/api/providers/chatgpt/key", { apiKey: "sk-not-used-here-1234" })).status, 400);
@@ -458,7 +460,7 @@ describe("provider registry and /api/providers", () => {
       qwen.regions.map((x) => x.id),
       ["intl", "us", "cn", "hk", "custom"],
     );
-    assert.equal((await api("POST", "/api/providers/openai/key", { apiKey: "x" })).status, 404);
+    assert.equal((await api("POST", "/api/providers/nosuch/key", { apiKey: "x" })).status, 404);
   });
 
   test("a rejected key stores nothing", async () => {
@@ -482,7 +484,7 @@ describe("provider registry and /api/providers", () => {
         ],
       },
     });
-    const r = await api("POST", "/api/providers/deepseek/key", { apiKey: DS_KEY });
+    const r = await api("POST", "/api/providers/deepseek/key", { apiKey: DS_KEY, remember: false });
     assert.equal(r.status, 200);
     const p = r.body.provider;
     assert.deepEqual(p.models, [
@@ -495,7 +497,7 @@ describe("provider registry and /api/providers", () => {
     assert.equal(p.remembered, false);
     assert.equal(p.model, null);
     assert.equal(fake.requests.at(-1).headers.authorization, `Bearer ${DS_KEY}`);
-    assert.ok(!existsSync(keysFile), "not remembered unless asked");
+    assert.ok(!existsSync(keysFile), "remember: false keeps it in memory only");
   });
 
   test("POST /api/config switches provider and model; the model can be typed", async () => {
@@ -503,7 +505,7 @@ describe("provider registry and /api/providers", () => {
     assert.equal((await api("POST", "/api/config", { provider: "qwen", model: "qwen-plus" })).status, 400, "no key");
     assert.equal((await api("POST", "/api/config", { provider: "nope", model: "x" })).status, 400);
     const r = await api("POST", "/api/config", { provider: "deepseek", model: "deepseek-flash" });
-    assert.deepEqual(r.body, { provider: "deepseek", model: "deepseek-flash", mode: "fanout", maxCards: 4, length: "auto", thinking: "auto" });
+    assert.deepEqual(r.body, { provider: "deepseek", model: "deepseek-flash", mode: "fanout", maxCards: 6, length: "auto", thinking: "auto", planner: null });
     assert.deepEqual((await api("GET", "/api/config")).body, r.body);
     assert.equal((await api("POST", "/api/config", { model: "my-typed-model" })).body.model, "my-typed-model");
     assert.equal((await api("POST", "/api/config", { model: "deepseek-flash", mode: "single" })).body.mode, "single");
@@ -525,7 +527,7 @@ describe("provider registry and /api/providers", () => {
       ],
     );
     assert.equal(cards[0].body, 'Alpha body: a < b, "q", back\\slash 🚀');
-    assert.ok(s.edges.some((e) => e.from === cards[0].id && e.to === cards[1].id && e.rel === "feeds"));
+    assert.ok(s.edges.some((e) => e.from === cards[1].id && e.to === cards[0].id && e.rel === "elaborates"));
     const sent = fake.chatRequests().slice(before);
     assert.equal(sent.length, 2, "two rounds");
     assert.equal(sent[0].body.max_tokens, 8000, "min(16000, maxOutput) from the model list");
@@ -573,7 +575,7 @@ describe("provider registry and /api/providers", () => {
   });
 
   test("remember writes .keys.json (0600) and DELETE removes it; startup reads it without calling upstream", async () => {
-    const r = await api("POST", "/api/providers/deepseek/key", { apiKey: DS_KEY, remember: true });
+    const r = await api("POST", "/api/providers/deepseek/key", { apiKey: DS_KEY }); // saved by default
     assert.equal(r.body.provider.remembered, true);
     assert.ok(existsSync(keysFile));
     assert.deepEqual(JSON.parse(readFileSync(keysFile, "utf8")), { deepseek: { apiKey: DS_KEY } });

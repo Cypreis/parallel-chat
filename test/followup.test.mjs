@@ -176,7 +176,7 @@ describe("follow-up: the model chooses the thread or a new card", () => {
     const w = await setup(providerWith((args) => play(args)));
     const other = w.other;
     play = script([
-      { blocks: [{ type: "tool_use", id: "l1", name: "link_cards", input: { from: w.card.id, to: other.id, rel: "contradicts" } }], stop: "tool_use" },
+      { blocks: [{ type: "tool_use", id: "l1", name: "link_cards", input: { from: w.card.id, to: other.id, rel: "elaborates" } }], stop: "tool_use" },
       { blocks: [{ type: "text", text: "Linked them." }], stop: "end_turn" },
     ]);
     const before = w.log.seq;
@@ -184,7 +184,7 @@ describe("follow-up: the model chooses the thread or a new card", () => {
     await w.engine.idle();
     const types = w.log.since(before).map((e) => (e.type === "node.patch" ? `patch:${Object.keys(e.patch)}` : e.type));
     assert.ok(types.indexOf("edge.add") < types.indexOf("patch:pending"), "the link ran before the path was decided");
-    assert.ok(w.s.edges.some((e) => e.from === w.card.id && e.to === other.id && e.rel === "contradicts"));
+    assert.ok(w.s.edges.some((e) => e.from === w.card.id && e.to === other.id && e.rel === "elaborates"));
     const [, assistant] = threadOf(w.s, w.card.id);
     assert.equal(assistant.body, "Linked them.");
     assert.equal(w.s.nodes[userNodeId].pending, false);

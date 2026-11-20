@@ -34,7 +34,7 @@ function fixture() {
 }
 
 test("createState returns the documented empty shape", () => {
-  assert.deepEqual(createState(), { seq: 0, nodes: {}, order: [], edges: [], decisions: [], chatMeta: {}, groups: [], notes: {}, docs: [] });
+  assert.deepEqual(createState(), { seq: 0, nodes: {}, order: [], edges: [], decisions: [], chatMeta: {}, groups: [], notes: {}, docs: [], saved: {}, folders: [] });
 });
 
 test("node.open inserts a copy, records seq and open order", () => {

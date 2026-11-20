@@ -54,12 +54,26 @@ export function renderTex(src, display) {
 // followed by a digit, so prices stay text. \$ is a literal dollar sign.
 function mathSpans(s, put) {
   s = s.replace(/\\\$/g, () => put('$'));
+  s = s.replace(/\\begin\{(aligned|align\*?|equation\*?|gather\*?|split|cases|[pbBvV]?matrix|array|alignedat|gathered)\}[\s\S]*?\\end\{\1\}/g, (m) => put(renderTex(m, true))); // bare environments
   s = s.replace(/\$\$([^$]+?)\$\$/g, (_, t) => put(renderTex(t, true)));
   s = s.replace(/\\\[([\s\S]+?)\\\]/g, (_, t) => put(renderTex(t, true)));
   s = s.replace(/\\\(([\s\S]+?)\\\)/g, (_, t) => put(renderTex(t, false)));
-  s = s.replace(/\$(?![\s$])([^$\n]*?[^\s\\$])\$(?!\d)|\$([^\s$\\])\$(?!\d)/g, (_, a, b) => put(renderTex(a ?? b, false)));
+  s = s.replace(/\$(?![\s$])([^$\n]*?[^\s\\$])\$(?!\d)|\$([^\s$\\])\$(?!\d)/g, (m, a, b) => {
+    const t = a ?? b;
+    // "$10, a 5$" is two prices, not math: a span that is only digits, commas and words is text
+    if (/^\d[\d.,]*(?:[\s,][^\\^_{}=+<>*/|()\[\]]*)?$/.test(t) && !/[\\^_{}=+<>*/|()]/.test(t)) return m;
+    return put(renderTex(t, false));
+  });
+  // "$ x_1 = 2 $" with spaces inside counts when it plainly holds LaTeX (a backslash, ^, _, { } or =): prices never do.
+  s = s.replace(/\$[ \t]+([^$\n]*?[\\^_{}=][^$\n]*?)[ \t]+\$(?!\d)/g, (_, t) => put(renderTex(t, false)));
+  // an inline formula still being written: its source, quietly, not as stray text
+  s = s.replace(/\$(?![\s$])([^$]*[\\^_{}][^$]*)$/, (_, t) => put('<span class="math-wait" aria-hidden="true">\u2026</span>'));
+  // a backslash before punctuation is that character (CommonMark): \% \& \_ \# \* …  and the text commands models borrow
+  s = s.replace(/\\(?:textbf|mathbf)\{([^{}]*)\}/g, (_, t) => put('<strong>' + escapeHtml(t) + '</strong>'));
+  s = s.replace(/\\(?:emph|textit|mathit)\{([^{}]*)\}/g, (_, t) => put('<em>' + escapeHtml(t) + '</em>'));
+  s = s.replace(/\\([\\`*_{}\[\]()#+\-.!|%&~^<>])/g, (_, c) => put(escapeHtml(c)));
   // A display formula still being written: its source, quietly, not as stray text.
-  s = s.replace(/(\$\$|\\\[)([^$]*)$/, (_, d, t) => put('<code class="math-src pending">' + escapeHtml(d + t) + '</code>'));
+  s = s.replace(/(\$\$|\\\[)([^$]*)$/, (_, d, t) => put('<span class="math-wait" aria-hidden="true">\u2026</span>'));
   return s;
 }
 
@@ -97,8 +111,27 @@ export function renderMarkdown(src) {
 // A display formula as its own block. While it is still streaming (no closing
 // delimiter yet) the source shows quietly instead of half-rendered.
 function mathBlock(tex, closed) {
-  if (!closed) return '<div class="math-block pending"><code class="math-src">' + escapeHtml(String(tex).trim()) + '</code></div>';
+  if (!closed) return '<div class="math-block pending"><span class="math-wait" aria-hidden="true">\u2026</span></div>';
   return '<div class="math-block">' + renderTex(tex, true) + '</div>';
+}
+
+// Diagrams, charts and SVG: a placeholder carrying the source, drawn by the
+// page (public/embeds.mjs) once its fence is closed. Until then, a quiet
+// "Drawing…" box instead of half a spec.
+export const EMBED_KINDS = { mermaid: 'mermaid', chart: 'chart', 'vega-lite': 'chart', vegalite: 'chart', vega: 'chart', svg: 'svg' };
+const EMBED_LABEL = { mermaid: 'diagram', chart: 'chart', svg: 'drawing' };
+function embedBlock(kind, src, closed) {
+  if (!closed || !src.trim()) return '<div class="embed pending" data-kind="' + kind + '"><span class="embed-ph">Drawing the ' + EMBED_LABEL[kind] + '…</span></div>';
+  return '<div class="embed" data-kind="' + kind + '" data-src="' + escapeHtml(src) + '"><span class="embed-ph">Drawing the ' + EMBED_LABEL[kind] + '…</span></div>';
+}
+
+// True when the text ends inside a $…$ formula that looks like LaTeX (an odd number of dollars, the last one opening it).
+function openMath(text) {
+  const t = text.replace(/\\\$/g, '').replace(/\$\$/g, '');
+  const n = (t.match(/\$/g) || []).length;
+  if (n % 2 === 0) return false;
+  const tail = t.slice(t.lastIndexOf('$') + 1);
+  return tail.length < 300 && /[\\^_{}=+]/.test(tail) && !/^\s/.test(tail);
 }
 
 const isTableSep = (l) => /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(l) && l.includes('-') && l.includes('|');
@@ -109,8 +142,13 @@ function splitRow(line) {
   if (t.endsWith('|') && !t.endsWith('\\|')) t = t.slice(0, -1);
   const cells = [];
   let cur = '';
-  for (const ch of t) {
-    if (ch === '|' && !cur.endsWith('\\')) { cells.push(cur.trim()); cur = ''; } else cur += ch;
+  // a | inside $…$ belongs to the formula ($|x|$); only when the dollars pair up
+  const dollars = (t.replace(/\\\$/g, '').match(/\$/g) || []).length;
+  let inMath = false;
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i];
+    if (ch === '$' && t[i - 1] !== '\\' && dollars % 2 === 0) inMath = !inMath;
+    if (ch === '|' && !inMath && !cur.endsWith('\\')) { cells.push(cur.trim()); cur = ''; } else cur += ch;
   }
   cells.push(cur.trim());
   return cells.map((c) => c.replace(/\\\|/g, '|'));
@@ -156,7 +194,9 @@ function renderBlocks(src) {
         if (closeRe.test(lines[i])) { closed = true; break; }
         code.push(lines[i]);
       }
+      const embed = EMBED_KINDS[m[2].toLowerCase()];
       if (/^(math|latex|tex|katex)$/i.test(m[2])) out.push(mathBlock(code.join('\n'), closed));
+      else if (embed) out.push(embedBlock(embed, code.join('\n'), closed));
       else out.push('<div class="code-wrap"><pre class="code' + (closed ? '' : ' open') + '"><code>' + escapeHtml(code.join('\n')) + '</code></pre>' + COPY_BTN + '</div>');
       continue;
     }
@@ -194,6 +234,9 @@ function renderBlocks(src) {
       if (list) list.blank = true;
       continue;
     }
+
+    // a formula that wraps onto this line: "+ c = d$" is not a list item
+    if (para.length && openMath(para.join(' '))) { para.push(line.trim()); continue; }
 
     if (line.includes('|') && i + 1 < lines.length && isTableSep(lines[i + 1])) {
       const head = splitRow(line);

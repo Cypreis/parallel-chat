@@ -25,6 +25,11 @@
     "@anthropic-ai/sdk": "^1.8.0"
   },
   "dependencies": {
-    "katex": "0.19.1"
+    "dompurify": "3.4.17",
+    "katex": "0.19.1",
+    "mermaid": "12.3.0",
+    "vega": "6.4.0",
+    "vega-embed": "7.3.0",
+    "vega-lite": "6.5.0"
   }
 }

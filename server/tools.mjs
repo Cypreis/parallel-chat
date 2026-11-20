@@ -2,7 +2,10 @@
 // for their inputs. Inputs stream with eager_input_streaming, so the API does
 // not validate them: every parsed input is checked here before it is acted on.
 
+// Older chats hold links of every kind; they still replay. The model may only
+// draw one: a sub-card (the first card goes deeper into the second).
 export const RELS = ["depends_on", "feeds", "contradicts", "alternative_to", "elaborates"];
+export const LINK_RELS = ["elaborates"];
 
 const str = (description) => ({ type: "string", description });
 
@@ -54,14 +57,14 @@ export const PLAN_CARD = {
 export const LINK_CARDS = {
   name: "link_cards",
   description:
-    "Link two cards so the reader can move from one to the other. Each end is either a key you gave a card in this answer or the id of an existing card from <board>, which may be in any chat. Call it only for links that would help the reader; the system prompt says what each rel means.",
+    "Make a card a sub-card of another: `from` is the sub-card that goes deeper into one point, `to` is the card it belongs under. Each end is either a key you gave a card in this answer or the id of an existing card from <board>. Use it only for a real parent and child, never for two cards that are merely about the same subject.",
   eager_input_streaming: true,
   input_schema: {
     type: "object",
     properties: {
-      from: str("Key from this answer, or id of an existing card."),
-      to: str("Key from this answer, or id of an existing card."),
-      rel: { type: "string", enum: RELS, description: "How the first card relates to the second." },
+      from: str("The sub-card: a key from this answer, or the id of an existing card."),
+      to: str("The parent card it goes deeper into: a key from this answer, or the id of an existing card."),
+      rel: { type: "string", enum: LINK_RELS, description: "Always elaborates: the sub-card (from) goes deeper into the parent (to)." },
     },
     required: ["from", "to", "rel"],
     additionalProperties: false,

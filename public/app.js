@@ -410,13 +410,20 @@ function render() {
   raf = 0;
   deferredBySelection = false;
   try {
-    if (els.board.clientWidth > 0) ui.boardW = els.board.clientWidth;
+    // A dialog or the palette covers the board: keep the board as it is (no
+    // re-render per streamed token behind the scrim) and catch up on close.
+    const modal = !!ui.pop || !!ui.palette;
+    setClass(document.documentElement, 'modal-open', modal);
+    if (els.board.clientWidth > 0 && !modal) ui.boardW = els.board.clientWidth;
     const ts = prepare();
-    renderChats(ts);
-    renderOverview(ui.activeId ? orderedCards(ui.activeId) : []);
+    if (!modal || !ui.boardDrawn) {
+      renderChats(ts);
+      renderOverview(ui.activeId ? orderedCards(ui.activeId) : []);
+      ui.boardDrawn = true;
+    }
     renderTop(ts);
     renderSide();
-    renderSideList(ts);
+    if (!modal) renderSideList(ts);
     renderDrawer();
     renderBar();
     renderSettings();
@@ -3872,6 +3879,7 @@ const pal = { items: [], idx: 0 };
 function openPalette(prefill = '') {
   if (!ui.palette) rememberOpener('palette');
   ui.palette = true;
+  setClass(document.documentElement, 'modal-open', true);
   setShown(els.palette, true);
   els.paletteInput.value = prefill;
   renderPalette();
@@ -3882,6 +3890,7 @@ function closePalette() {
   ui.palette = false;
   setShown(els.palette, false);
   restoreOpener('palette', null);
+  schedule(); // the board catches up on what it skipped while covered
 }
 function paletteItems(q) {
   const t = q.trim();

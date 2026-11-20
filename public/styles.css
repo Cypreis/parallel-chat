@@ -858,7 +858,9 @@ kbd { font: var(--t-12) var(--mono); border: 1px solid var(--border-strong); bor
 /* dialogs, drawer and popovers: springs; scrim blurs */
 @keyframes pop-in { from { opacity: 0; transform: scale(.96); } to { opacity: 1; transform: none; } }
 .dialog-wrap:not([hidden]) .dialog { animation: pop-in 240ms var(--spring); }
-.dialog-scrim { backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+/* No backdrop blur: blurring the whole board behind a dialog (re-done on every
+   frame of every animation under it) was what made Settings and popups slow. */
+.dialog-scrim { background: rgba(0, 0, 0, 0.45); }
 .drawer { animation: slide-right 260ms var(--spring); }
 .send-btn.has-text { animation: send-pop 300ms var(--spring); }
 @keyframes send-pop { from { transform: scale(.85); } to { transform: none; } }
@@ -1176,3 +1178,16 @@ details.dec-sec[open] > summary::before { content: "\25BE"; }
 .math-src.pending, .math-block.pending { opacity: .6; }
 .think-btn::before { content: "Thinking: "; }
 @media (max-width: 600px) { .think-btn::before { content: none; } }
+
+/* ===================================================== performance */
+
+/* While a dialog or the palette is open, the board behind it stands still:
+   no looping animation keeps repainting what the scrim covers. */
+.modal-open .board *, .modal-open .board *::before, .modal-open .board *::after,
+.modal-open .side *, .modal-open .side *::before, .modal-open .side *::after { animation-play-state: paused !important; }
+.modal-open .board { pointer-events: none; }
+
+/* A card's layout and styles stay inside it: a card growing (streaming, the
+   hover reply box) does not make the browser re-check the rest of the page. */
+.card { contain: layout style; }
+.card-scroll { contain: content; }
